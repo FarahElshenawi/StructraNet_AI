@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, FrozenSet, List, Optional, Set, Tuple
 
+from constants.hardware import NO_CONFIG_TYPES
 from hw_config import DYNAMIPS_BUILTIN_PORTS as _HW_DYNAMIPS_BUILTIN_PORTS
 from hw_config import DYNAMIPS_SERIAL_MODULE_INTERFACES as _HW_SERIAL_MOD_INTERFACES
 from hw_config import IOU_PORTS_PER_ADAPTER as _HW_IOU_PORTS_PER_ADAPTER
@@ -65,14 +66,6 @@ L2_CONCENTRATOR_TYPES: FrozenSet[str] = frozenset(["ethernet_switch", "ethernet_
 L3_ROUTER_TYPES: FrozenSet[str] = frozenset([
     "dynamips", "iou", "qemu", "docker", "virtualbox", "vmware",
 ])
-# NO_CONFIG_TYPES is now imported from gns3_constants.py (single source of truth).
-# If you need this set, use:
-#   from gns3_constants import NO_CONFIG_TYPES
-NO_CONFIG_TYPES: FrozenSet[str] = frozenset([
-    "ethernet_switch", "ethernet_hub", "nat", "cloud",
-    "frame_relay_switch", "atm_switch",
-])
-
 NODE_ROLE_MAP: Dict[str, str] = {
     "dynamips": "router", "iou": "router", "qemu": "appliance",
     "docker": "container", "vpcs": "host", "traceng": "host",

@@ -40,6 +40,8 @@ import os
 from copy import deepcopy
 from typing import Any, Dict, Optional
 
+from constants.appliances import APPLIANCE_CATALOG
+
 logger = logging.getLogger("structranet.appliance_catalog")
 
 
@@ -61,104 +63,6 @@ logger = logging.getLogger("structranet.appliance_catalog")
 #    ethernet_switch : console_type, port_name_format, port_segment_size
 #    ethernet_hub    : port_name_format, port_segment_size
 #
-
-APPLIANCE_CATALOG: Dict[str, Dict[str, Any]] = {
-    # ── Dynamips: Cisco 7200 Series ──────────────────────────────────────────
-    # Ref: gns3server/compute/dynamips/nodes/c7200.py
-    # The c7200 uses Port Adapters (PA-*) in slots 1-6.
-    # Slot 0 is the NPE (Network Processing Engine) with built-in FastEthernet.
-    "Cisco 7200": {
-        "node_type": "dynamips",
-        "platform": "c7200",
-        "image": "c7200-adventerprisek9-mz.124-24.T5.image",
-        "ram": 512,
-        "nvram": 512,
-        "slot0": "PA-FE-TX",           # NPE-400 built-in FastEthernet (1 port)
-        "console_type": "telnet",
-        "port_name_format": "FastEthernet{0}/{1}",
-        "port_segment_size": 1,
-    },
-
-    # ── Dynamips: Cisco 3745 ─────────────────────────────────────────────────
-    # Ref: gns3server/compute/dynamips/nodes/c3745.py
-    # Uses Network Modules (NM-*) in slots 1-4.
-    # Built-in: GT96100-FE on slot 0 (2 FastEthernet ports: Fa0/0, Fa0/1).
-    "Cisco 3745": {
-        "node_type": "dynamips",
-        "platform": "c3745",
-        "image": "c3745-adventerprisek9-mz.124-25d.image",
-        "ram": 256,
-        "nvram": 256,
-        "slot0": "GT96100-FE",         # Built-in dual FastEthernet
-        "console_type": "telnet",
-        "port_name_format": "FastEthernet{0}/{1}",
-        "port_segment_size": 1,
-    },
-
-    # ── IOU L3 (Layer 3 image -- routing) ────────────────────────────────────
-    # Ref: gns3server/compute/iou/iou_vm.py
-    # IOU uses integer slot values: 2 = Ethernet module with 4 ports,
-    # 1 = Serial module with 4 ports, "l2" = L2 switching module.
-    # Default: 2 ethernet adapters, 0 serial adapters.
-    # application_id is auto-assigned by hw_config.py (see H-3).
-    "IOU L3": {
-        "node_type": "iou",
-        "path": "/opt/gns3/images/i86bi-linux-l3-adventerprisek9-15.5.2T.bin",
-        "ram": 256,
-        "nvram": 128,
-        "ethernet_adapters": 2,
-        "serial_adapters": 0,
-        "console_type": "telnet",
-        "port_name_format": "Ethernet{0}/{1}",
-        "port_segment_size": 4,
-    },
-
-    # ── IOU L2 (Layer 2 image -- switching) ──────────────────────────────────
-    # L2 images use slot0 = "l2" for switching support.
-    # Default: 1 ethernet adapter (with l2 module), 0 serial adapters.
-    "IOU L2": {
-        "node_type": "iou",
-        "path": "/opt/gns3/images/i86bi-linux-l2-adventerprisek9-15.2d.bin",
-        "ram": 256,
-        "nvram": 128,
-        "ethernet_adapters": 1,
-        "serial_adapters": 0,
-        "slot0": "l2",
-        "console_type": "telnet",
-        "port_name_format": "Ethernet{0}/{1}",
-        "port_segment_size": 4,
-    },
-
-    # ── VPCS (Virtual PC Simulator) ──────────────────────────────────────────
-    # Ref: gns3server/compute/vpcs/vpcs_vm.py
-    # Hard-locked to 1 Ethernet port.  No expansion possible.
-    "VPCS": {
-        "node_type": "vpcs",
-        "console_type": "telnet",
-        "port_name_format": "Ethernet{0}",
-        "port_segment_size": 1,
-    },
-
-    # ── Ethernet Switch (built-in GNS3 switch) ──────────────────────────────
-    # Ref: gns3server/compute/builtin/nodes/ethernet_switch.py
-    # Ports are managed via ports_mapping, NOT slots/adapters.
-    "Ethernet Switch": {
-        "node_type": "ethernet_switch",
-        "console_type": "none",
-        "port_name_format": "Ethernet{0}",
-        "port_segment_size": 1,
-    },
-
-    # ── Ethernet Hub (built-in GNS3 hub) ────────────────────────────────────
-    # Ref: gns3server/compute/builtin/nodes/ethernet_hub.py
-    # Like a switch but all ports are access/untagged (no VLANs).
-    "Ethernet Hub": {
-        "node_type": "ethernet_hub",
-        "port_name_format": "Ethernet{0}",
-        "port_segment_size": 1,
-    },
-}
-
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  Catalog Loading with User Overlay

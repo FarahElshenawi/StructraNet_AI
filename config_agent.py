@@ -24,6 +24,7 @@ from typing import Any, Dict, FrozenSet, List, Optional, Set, Tuple
 
 from dotenv import load_dotenv
 
+from constants.phase2 import ALLOWED_VALUE_TYPES, SOFTWARE_CONFIG_KEYS
 from context_builder import build_configuration_brief
 from llm_utils import _call_with_retry, _extract_json, _get_client
 from topology_finalizer import apply_switch_port_patches
@@ -40,30 +41,6 @@ MAX_TOKENS = int(os.getenv("AI_MAX_TOKENS", "8192"))
 # ═══════════════════════════════════════════════════════════════════════════════
 #  Gate 1: Software Config Key Whitelist
 # ═══════════════════════════════════════════════════════════════════════════════
-
-# ONLY these keys are allowed to be written by the LLM.
-# Any key not on this list (e.g. slot1, adapters, ports_mapping) is REJECTED.
-#
-# Source — GNS3 server verified:
-#   startup_config_content  → dynamips, iou, qemu  (Cisco IOS / device config)
-#   startup_script          → vpcs                  (NOT startup_script_content!)
-#   start_command           → docker                (container entrypoint)
-#   environment             → docker                (env vars dict)
-SOFTWARE_CONFIG_KEYS: FrozenSet[str] = frozenset([
-    "startup_config_content",
-    "startup_script",
-    "start_command",
-    "environment",
-])
-
-# Allowed value types per config key (Gate 3)
-ALLOWED_VALUE_TYPES: Dict[str, tuple] = {
-    "startup_config_content": (str,),
-    "startup_script":         (str,),
-    "start_command":          (str,),
-    "environment":            (dict, str),  # dict preferred, str accepted for flexibility
-}
-
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  Prompt Builder

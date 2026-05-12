@@ -19,11 +19,14 @@ import argparse
 import json
 import logging
 import os
+from pathlib import Path
 import sys
 
 from appliance_catalog import load_catalog
 from ai_agent import generate_network_topology, process_and_save_topology
-from topology_finalizer import apply_switch_port_patches
+from gns3_exporter import convert as export_gns3project
+from gns3project_validator import GNS3ProjectValidator
+from hw_config import DYNAMIPS_BUILTIN_PORTS, DYNAMIPS_BUILTIN_DEFAULT, DYNAMIPS_SLOT_MODULES
 from config_agent import run_phase2
 
 logger = logging.getLogger("structranet.main")
@@ -48,6 +51,10 @@ def parse_args():
                         help="Path to custom appliance catalog JSON overlay")
     parser.add_argument("--no-phase2", action="store_true",
                         help="Skip Phase 2 (software configuration generation)")
+    parser.add_argument("--project-output", type=str, default=None,
+                        help="Output .gns3project path (default: output/<final_json_stem>.gns3project)")
+    parser.add_argument("--no-validate", action="store_true",
+                        help="Skip .gns3project structural validation")
     return parser.parse_args()
 
 
@@ -55,10 +62,15 @@ def parse_args():
 #  Catalog → Inventory Adapter
 # ═══════════════════════════════════════════════════════════════════════════════
 
-# Port-count derivation constants (mirrors schema.py Topology class limits)
+# Port-count derivation constants
+# Derive Dynamips limits from hw_config single source of truth:
+# builtin ports + (ports_per_module * max_slots).
 _DYNAMIPS_MAX_PORTS = {
-    "c7200": 3, "c3745": 6, "c3725": 6, "c3660": 5,
-    "c3640": 4, "c3620": 4, "c2691": 6, "c2600": 2, "c1700": 2,
+    platform: (
+        DYNAMIPS_BUILTIN_PORTS.get(platform, DYNAMIPS_BUILTIN_DEFAULT)
+        + (cfg["ports_per_module"] * cfg["max_slots"])
+    )
+    for platform, cfg in DYNAMIPS_SLOT_MODULES.items()
 }
 _SINGLE_PORT_TYPES = {"vpcs", "traceng", "nat"}
 _MAX_EXPANDABLE_PORTS = {
@@ -164,16 +176,7 @@ def main():
         sys.exit(1)
     print(f"  Hardware-injected topology saved to: {phase1_file}")
 
-    # ── Step 4b/5: VLAN switch port patching ─────────────────────────────────
-    # Rewrite ethernet_switch ports_mapping so trunk and access ports reflect
-    # the VLAN plan.  Must happen after hardware injection (ports_mapping exists)
-    # and before Phase 2 (configs need the correct trunk/access layout).
     topo_dict = enriched.model_dump()
-    apply_switch_port_patches(topo_dict)
-    # Persist the patched topology so run_phase2 (which reads from disk) sees it
-    with open(phase1_file, "w", encoding="utf-8") as _f:
-        json.dump(topo_dict, _f, indent=2)
-    print("  Switch port patches applied (VLAN trunk/access layout)")
 
     # ── Step 5/5: Phase 2 — Software configuration generation ───────────────
     final_file = args.output or os.path.join(OUTPUT_DIR, "final_topology.json")
@@ -213,6 +216,33 @@ def main():
     print(f"\n  Summary: {node_count} node(s), {link_count} link(s), "
           f"{configured} node(s) with software configs")
     print(f"  Output: {final_file}")
+
+    # ── Export: final_topology.json → .gns3project ───────────────────────────
+    print("\n[6/6] Exporting portable GNS3 project (.gns3project)...")
+    project_output = args.project_output
+    if not project_output:
+        final_stem = Path(final_file).stem
+        project_output = os.path.join(OUTPUT_DIR, f"{final_stem}.gns3project")
+
+    try:
+        project_path = export_gns3project(final_dict, project_output)
+        print(f"  Export complete: {project_path}")
+    except Exception as exc:
+        print(f"[ERR] Export failed: {exc}")
+        sys.exit(1)
+
+    # ── Validation gate (optional) ────────────────────────────────────────────
+    if args.no_validate:
+        print("  Validation skipped (--no-validate)")
+    else:
+        print("  Running structural validator...")
+        validator = GNS3ProjectValidator(project_path, verbose=False)
+        ok = validator.validate()
+        if ok:
+            print("  Validator result: PASS")
+        else:
+            print("[ERR] Validator result: FAIL (see issues above)")
+            sys.exit(1)
 
 
 if __name__ == "__main__":

@@ -86,16 +86,16 @@ Structranet AI uses a **two-phase, multi-agent pipeline** that separates logical
 
 ## Pipeline
 
-The full pipeline runs in 5 steps via CLI or as an interactive Streamlit session:
+The full CLI pipeline now runs in 6 steps:
 
 | Step | Module | Description |
 |------|--------|-------------|
-| 1/5 | User input | CLI argument or interactive prompt |
-| 2/5 | `ai_agent` | LLM generates `TopologyRequest` (nodes + logical connections) |
-| 3/5 | `port_assigner` → `hw_config` | Deterministic port assignment + hardware slot injection |
-| 3b | `topology_finalizer` | VLAN-aware switch port patching (trunk/access) |
-| 4/5 | `config_agent` | LLM generates software configs (IPs, routing, startup scripts) |
-| 5/5 |`gns3_exporter` | Enrich to GNS3 format + export `.gns3project` ZIP |
+| 1/6 | User input | CLI argument or interactive prompt |
+| 2/6 | `ai_agent` | LLM generates `TopologyRequest` (nodes + logical connections) |
+| 3/6 | `port_assigner` → `hw_config` | Deterministic port assignment + hardware slot injection |
+| 4/6 | `config_agent` | LLM generates software configs (IPs, routing, startup scripts); includes VLAN switch-port patching via `topology_finalizer` |
+| 5/6 | `gns3_exporter` | Convert final topology JSON to portable `.gns3project` ZIP |
+| 6/6 | `gns3project_validator` | Run 11 structural checks to ensure import safety |
 
 ---
 
@@ -103,7 +103,7 @@ The full pipeline runs in 5 steps via CLI or as an interactive Streamlit session
 
 ```
 structranet-ai/
-├── main.py                     # Grand orchestrator — 5-step CLI pipeline
+├── main.py                     # Grand orchestrator — 6-step CLI pipeline
 │
 ├── ai_agent.py                 # Phase 1: LLM topology generation + edit mode
 ├── config_agent.py             # Phase 2: LLM software config generation
@@ -114,7 +114,12 @@ structranet-ai/
 ├── topology_finalizer.py       # VLAN switch port patching (trunk/access)
 ├── context_builder.py          # Configuration brief builder + port name resolution
 │
-├── gns3_constants.py           # GNS3 format constants (single source of truth)
+├── constants/                  # Shared constants package (single source of truth)
+│   ├── gns3.py                 # GNS3 format constants
+│   ├── hardware.py             # Hardware and node-type constants
+│   ├── appliances.py           # Built-in appliance catalog constants
+│   ├── phase2.py               # Phase 2 safe-merge constants
+│   └── ai.py                   # AI pipeline constants (retry/limits)
 ├── appliance_catalog.py        # Static appliance definitions (Cisco 7200, IOU, VPCS, etc.)
 │
 ├── gns3_exporter.py            # .gns3project ZIP archive packaging + verification
@@ -138,7 +143,11 @@ structranet-ai/
 | `hw_config.py` | Hardware expansion | `inject_hardware_config()` — Dynamips slots, IOU adapters, QEMU adapters, switch ports_mapping |
 | `topology_finalizer.py` | VLAN switching | `apply_switch_port_patches()` — trunk/access/dot1q port rewrites |
 | `context_builder.py` | LLM context builder | `build_configuration_brief()`, `resolve_port_name()`, `build_segments()` |
-| `gns3_constants.py` | Shared constants | `GNS3_REVISION`, `FILE_CONFIG_TRIPLETS`, `SYMBOL`, `PORT_NAME_FORMAT`, etc. |
+| `constants/gns3.py` | Shared GNS3 constants | `GNS3_REVISION`, `FILE_CONFIG_TRIPLETS`, `SYMBOL`, `PORT_NAME_FORMAT`, etc. |
+| `constants/hardware.py` | Shared hardware constants | Dynamips module tables, adapter limits, node type sets |
+| `constants/phase2.py` | Phase 2 merge constants | `SOFTWARE_CONFIG_KEYS`, `ALLOWED_VALUE_TYPES` |
+| `constants/ai.py` | AI generation constants | `MAX_RETRIES`, prompt-side link-limit tables |
+| `constants/appliances.py` | Appliance defaults constants | `APPLIANCE_CATALOG` |
 | `appliance_catalog.py` | Template defaults | `get_appliance()`, `load_catalog()` with user overlay support |
 | `gns3_exporter.py` | ZIP packaging | `export_project()`, `export_topology()`, `verify_archive()` |
 | `gns3project_validator.py` | Deep validation | `GNS3ProjectValidator` — 11 structural checks against GNS3 spec |
@@ -176,11 +185,17 @@ EOF
 
 **CLI mode:**
 ```bash
-# Generate and export to .gns3project
-python main.py --request "Build a campus network with 2 routers, a core switch, 3 access switches, and 9 PCs across 3 VLANs" --no-deploy
+# Generate, export, and validate .gns3project
+python main.py --request "Build a campus network with 2 routers, a core switch, 3 access switches, and 9 PCs across 3 VLANs"
 
 # Skip Phase 2 (software configs)
-python main.py --request "3-router topology" --no-deploy --no-phase2
+python main.py --request "3-router topology" --no-phase2
+
+# Custom .gns3project output path
+python main.py --request "3-router topology" --project-output output/my_lab.gns3project
+
+# Skip validator (not recommended)
+python main.py --request "3-router topology" --no-validate
 ```
 
 **Programmatic export:**
@@ -208,9 +223,9 @@ print(f"Exported to: {path}")
 |----------|-------|-------------|
 | `--request` | `-r` | Network description (skips interactive prompt) |
 | `--output` | `-o` | Output JSON file path |
-| `--no-deploy` | | Generate JSON only, skip deployment/export |
 | `--no-phase2` | | Skip Phase 2 (software configuration generation) |
-| `--deploy-only` | | Deploy an existing JSON file (skip steps 1-4) |
+| `--project-output` | | Output `.gns3project` path |
+| `--no-validate` | | Skip post-export structural validation |
 
 ### Environment Variables
 
@@ -286,7 +301,7 @@ The same topology JSON always produces the same `.gns3project` file:
 
 ### 4. Single Source of Truth for Constants
 
-`gns3_constants.py` is the authoritative reference for all GNS3-format constants:
+The `constants/` package is the authoritative reference for shared constants:
 
 - File format version/revision
 - Config file path mappings (software_key x node_type → filesystem path)
@@ -308,7 +323,7 @@ The project pivoted from live GNS3 REST API deployment to offline `.gns3project`
 
 ### 6. Validated Against GNS3 Source Code
 
-Every constant in `gns3_constants.py`, every Dynamips module in `hw_config.py`, and every slot compatibility rule has been verified against the actual GNS3 server source code (branch 2.2). This ensures:
+Every constant in `constants/gns3.py`, every Dynamips module in `constants/hardware.py`/`hw_config.py`, and every slot compatibility rule has been verified against the actual GNS3 server source code (branch 2.2). This ensures:
 
 - Slot module names match exactly (e.g., `PA-8E`, `NM-4T`, `GT96100-FE`)
 - Port counts per module are accurate
@@ -428,16 +443,9 @@ IOU (IOS on Unix) nodes use a different expansion model from Dynamips:
 
 ### Pending Code Fixes (Phase 4)
 
-The following issues have been identified through GNS3 source code audit but are not yet applied to the main codebase. Corrected versions exist in `structranet_phase3/`:
+Most previously documented constant-drift issues were resolved by migrating shared values to `constants/`.
 
-| Issue | File | Description |
-|-------|------|-------------|
-| PORT_SEGMENT_SIZE | `gns3_constants.py` | Should be `0` for non-IOU and `4` for IOU (not a per-type dict with all 1s) |
-| IOU config paths | `gns3_constants.py` | IOU uses `startup-config.cfg` directly, not `configs/startup-config.cfg` |
-| CONSOLE_TYPE values | `gns3_constants.py` | Built-in types should omit `console_type` key entirely (not set to `"none"`) |
-| QEMU config paths | `gns3_constants.py` | QEMU does not support `startup_config_content` per GNS3 schemas |
-| c3660 builtin ports | `hw_config.py` | Should be `0` (not `2`) — c3660 has no built-in Ethernet |
-| Duplicate constants | Multiple files | `SOFTWARE_CONFIG_KEYS`, `NO_CONFIG_TYPES`, `_DYNAMIPS_MAX_PORTS` duplicated across modules |
+Remaining work should focus on behavior-level hardening (integration tests, broader fixture coverage, and any platform-specific edge cases uncovered during validation).
 
 ### Planned Improvements
 - **Derive Dynamips max ports from hw_config**: Remove hardcoded `_DYNAMIPS_MAX_PORTS` from `schema.py`, compute from `hw_config.DYNAMIPS_SLOT_MODULES`

@@ -125,13 +125,20 @@ import zipfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-logger = logging.getLogger("gns3_exporter")
+from constants.gns3 import (
+    CONSOLE_TYPE,
+    DEFAULT_ROLE_PRIORITY,
+    FILE_CONFIG_TRIPLETS,
+    GNS3_REVISION,
+    GNS3_VERSION,
+    LABEL_STYLE,
+    ROLE_PRIORITY,
+    SCENE_HEIGHT,
+    SCENE_WIDTH,
+    SYMBOL,
+)
 
-# ── GNS3 portable project format constants ────────────────────────────────────
-GNS3_REVISION = 9        # revision 9 = GNS3 2.2.x portable project format
-GNS3_VERSION  = "2.2.0"  # minimum version string (triggers 2.2 import path)
-SCENE_WIDTH   = 2000
-SCENE_HEIGHT  = 1000
+logger = logging.getLogger("gns3_exporter")
 
 _UUID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
@@ -146,64 +153,10 @@ def _is_uuid(s: str) -> bool:
 #  Visual defaults (GNS3 GUI display)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-_SYMBOL: Dict[str, str] = {
-    "dynamips":           ":/symbols/router.svg",
-    "iou":                ":/symbols/multilayer_switch.svg",  # IOU ≠ router; correct symbol
-    "qemu":               ":/symbols/router.svg",
-    "docker":             ":/symbols/docker_guest.svg",
-    "vpcs":               ":/symbols/vpcs_guest.svg",
-    "traceng":            ":/symbols/traceng.svg",
-    "ethernet_switch":    ":/symbols/ethernet_switch.svg",
-    "ethernet_hub":       ":/symbols/hub.svg",
-    "cloud":              ":/symbols/cloud.svg",
-    "nat":                ":/symbols/nat.svg",
-    "virtualbox":         ":/symbols/vbox_guest.svg",
-    "vmware":             ":/symbols/vmware_guest.svg",
-    "frame_relay_switch": ":/symbols/frame_relay_switch.svg",
-    "atm_switch":         ":/symbols/atm_switch.svg",
-}
-
 _SIZE: Dict[str, Tuple[int, int]] = {
     "cloud": (95, 65), "nat": (95, 65),
 }
 _DEFAULT_SIZE = (65, 65)
-
-# console_type enum: "telnet" | "vnc" | "http" | null
-# Nodes that cannot be console-connected use null (JSON null, Python None).
-# The string "none" is NOT a valid enum value and causes GNS3 schema errors.
-_CONSOLE_TYPE: Dict[str, Optional[str]] = {
-    "dynamips":           "telnet",
-    "iou":                "telnet",
-    "qemu":               "telnet",
-    "docker":             "telnet",
-    "vpcs":               "telnet",
-    "traceng":            None,
-    "ethernet_switch":    None,
-    "ethernet_hub":       None,
-    "cloud":              None,
-    "nat":                None,
-    "virtualbox":         "telnet",
-    "vmware":             "telnet",
-    "frame_relay_switch": None,
-    "atm_switch":         None,
-}
-
-# Layout priority for auto-positioning on the canvas
-_ROLE_PRIORITY: Dict[str, int] = {
-    "cloud": 0, "nat": 0,
-    "dynamips": 1, "iou": 1, "qemu": 1, "virtualbox": 1, "vmware": 1,
-    "ethernet_switch": 2, "ethernet_hub": 2,
-    "frame_relay_switch": 2, "atm_switch": 2,
-    "vpcs": 3, "traceng": 3, "docker": 3,
-}
-
-_LABEL_STYLE = (
-    "font-family: TypeWriter;"
-    "font-size: 10.0;"
-    "font-weight: bold;"
-    "fill: #000000;"
-    "fill-opacity: 1.0;"
-)
 
 # Per-type node dimensions matching GNS3 GUI defaults (Spec §7.3, Appendix A)
 # router/IOU: width=56 height=40 | VPCS/TraceNG: width=34 height=32 | others: 65x65
@@ -316,21 +269,6 @@ _NODE_TYPE_DIR: Dict[str, str] = {
     "vmware":     "vmware",
 }
 
-# Config key → (node_type, ZIP subpath within the node's directory)
-# Full ZIP path: project-files/<node_type_dir>/<node_uuid>/<subpath>
-# CRITICAL: IOU config lives directly under the node UUID dir — no configs/ subdir.
-# Dynamips/QEMU use a configs/ subdirectory; IOU does NOT.
-# Source: gns3server/compute/iou/iou_vm.py vs gns3server/compute/dynamips/dynamips_vm.py
-_CONFIG_FILES: List[Tuple[str, str, str]] = [
-    ("startup_config_content", "dynamips", "configs/startup-config.cfg"),
-    ("startup_config_content", "iou",      "startup-config.cfg"),       # NO configs/ subdir
-    ("startup_config_content", "qemu",     "configs/startup-config.cfg"),
-    ("private_config_content", "dynamips", "configs/private-config.cfg"),
-    ("private_config_content", "iou",      "private-config.cfg"),       # NO configs/ subdir
-    ("startup_script",         "vpcs",     "startup.vpc"),
-]
-
-
 # ═══════════════════════════════════════════════════════════════════════════════
 #  Input normalisation
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -414,7 +352,10 @@ def _grid_positions(nodes: List[dict]) -> Dict[str, Tuple[int, int]]:
 
     scored = sorted(
         needs_layout,
-        key=lambda n: (_ROLE_PRIORITY.get(n.get("node_type", ""), 4), n.get("node_id", "")),
+        key=lambda n: (
+            ROLE_PRIORITY.get(n.get("node_type", ""), DEFAULT_ROLE_PRIORITY),
+            n.get("node_id", ""),
+        ),
     )
 
     positions: Dict[str, Tuple[int, int]] = dict(existing)
@@ -422,7 +363,7 @@ def _grid_positions(nodes: List[dict]) -> Dict[str, Tuple[int, int]]:
 
     for n in scored:
         nid = n.get("node_id", "")
-        priority = _ROLE_PRIORITY.get(n.get("node_type", ""), 4)
+        priority = ROLE_PRIORITY.get(n.get("node_type", ""), DEFAULT_ROLE_PRIORITY)
 
         if last_priority is not None and priority != last_priority:
             row += 1
@@ -586,7 +527,7 @@ def _extract_configs(node: dict, node_uuid: str) -> Dict[str, str]:
     type_dir = _NODE_TYPE_DIR.get(ntype, ntype)
     result: Dict[str, str] = {}
 
-    for prop_key, target_type, subpath in _CONFIG_FILES:
+    for prop_key, target_type, subpath in FILE_CONFIG_TRIPLETS:
         if target_type != ntype:
             continue
         value = props.get(prop_key)
@@ -888,19 +829,19 @@ def convert(
             "node_type":        ntype,
             "name":             n.get("name", nid),
             "console":          None,
-            "console_type":     _CONSOLE_TYPE.get(ntype),  # None → JSON null
+            "console_type":     CONSOLE_TYPE.get(ntype),  # None → JSON null
             "x":                x,
             "y":                y,
             "z":                n.get("z", 1),
             "width":            w,
             "height":           h,
-            "symbol":           _SYMBOL.get(ntype, ":/symbols/computer.svg"),
+            "symbol":           SYMBOL.get(ntype, ":/symbols/computer.svg"),
             "label": {
                 "text":     n.get("name", nid),
                 "x":        label.get("x", lx),   # per-type offset
                 "y":        label.get("y", ly),
                 "rotation": 0,
-                "style":    _LABEL_STYLE,
+                "style":    LABEL_STYLE,
             },
             "properties":       _clean_properties(n),
             "port_name_format": port_name_format,
@@ -965,7 +906,7 @@ def convert(
                         "x":        0,
                         "y":        0,
                         "rotation": 0,
-                        "style":    _LABEL_STYLE,
+                        "style":    LABEL_STYLE,
                     },
                 },
                 {
@@ -977,7 +918,7 @@ def convert(
                         "x":        0,
                         "y":        0,
                         "rotation": 0,
-                        "style":    _LABEL_STYLE,
+                        "style":    LABEL_STYLE,
                     },
                 },
             ],

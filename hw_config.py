@@ -32,250 +32,42 @@ import logging
 import math
 from typing import Any, Dict, List, Optional
 
+from constants.hardware import (
+    DYNAMIPS_BUILTIN_DEFAULT,
+    DYNAMIPS_BUILTIN_INTERFACE_DETAILS,
+    DYNAMIPS_BUILTIN_PORTS,
+    DYNAMIPS_BUILTIN_SERIAL_PORTS,
+    DYNAMIPS_FALLBACK,
+    DYNAMIPS_MODULE_INTERFACES,
+    DYNAMIPS_SERIAL_FALLBACK,
+    DYNAMIPS_SERIAL_MODULES,
+    DYNAMIPS_SLOT_MODULES,
+    IMMUTABLE_PORT_COUNT,
+    IMMUTABLE_TYPES,
+    IOU_DEFAULT_ETH_ADAPTERS,
+    IOU_DEFAULT_SER_ADAPTERS,
+    IOU_MAX_ADAPTERS,
+    IOU_PORTS_PER_ADAPTER,
+    L2_CONCENTRATOR_TYPES,
+    L3_ROUTER_TYPES,
+    MAPPING_BASED_TYPES,
+    MAX_ADAPTERS,
+    NO_CONFIG_TYPES,
+    SWITCH_HUB_DEFAULT_PORTS,
+)
+
 logger = logging.getLogger("structranet.hw_config")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  Constants — adapter limits, module mappings, built-in port counts
 # ═══════════════════════════════════════════════════════════════════════════════
-
-# ── Tier 1b: Max adapters per virtualisation engine ──────────────────────────
-# Source: gns3server/schemas/{qemu,docker,virtualbox,vmware}_template.py
-MAX_ADAPTERS: Dict[str, int] = {
-    "qemu": 275,        # PCI bus limit (4 default + disks + adapters + bridges)
-    "docker": 99,       # practical Docker limit
-    "virtualbox": 8,    # safe default (PIIX3 chipset); ICH9 allows up to 36
-    "vmware": 10,       # VMware VM hard limit
-}
-
-# ── Tier 1a: Dynamips Ethernet slot-module catalogue ──────────────────────────
-# Each entry maps a platform identifier to the expansion module we inject.
-#
-#   module              — GNS3 module identifier written to the slotN property
-#   ports_per_module    — how many Ethernet ports that module provides
-#   first_configurable  — the first user-configurable slot (slot0 is built-in)
-#   max_slots           — total configurable slots available on the platform
-#
-# Ref: gns3server/compute/dynamips/nodes/c7200.py et al.
-DYNAMIPS_SLOT_MODULES: Dict[str, Dict[str, Any]] = {
-    # ── c7200 series: Port Adapters ──
-    "c7200": {
-        "module": "PA-8E",             # 8 Ethernet ports per PA
-        "ports_per_module": 8,
-        "first_configurable": 1,       # slot0 is NPE built-in
-        "max_slots": 6,                # slot1–slot6
-    },
-    # ── c3700 series: Network Modules ──
-    "c3745": {
-        "module": "NM-4E",             # 4 Ethernet ports per NM
-        "ports_per_module": 4,
-        "first_configurable": 1,
-        "max_slots": 4,                # slot1–slot4
-    },
-    "c3725": {
-        "module": "NM-4E",
-        "ports_per_module": 4,
-        "first_configurable": 1,
-        "max_slots": 2,                # slot1–slot2
-    },
-    # ── c3600 series: Network Modules ──
-    "c3660": {
-        "module": "NM-4E",
-        "ports_per_module": 4,
-        "first_configurable": 1,
-        "max_slots": 6,
-    },
-    "c3640": {
-        "module": "NM-4E",
-        "ports_per_module": 4,
-        "first_configurable": 1,
-        "max_slots": 4,
-    },
-    "c3620": {
-        "module": "NM-4E",
-        "ports_per_module": 4,
-        "first_configurable": 1,
-        "max_slots": 2,
-    },
-    # ── c2600 / c1700 series ──
-    "c2691": {
-        "module": "NM-4E",
-        "ports_per_module": 4,
-        "first_configurable": 1,
-        "max_slots": 1,                # slot1 only
-    },
-    "c2600": {
-        "module": "NM-1E",            # 1 Ethernet port (limited platform)
-        "ports_per_module": 1,
-        "first_configurable": 1,
-        "max_slots": 1,
-    },
-    "c1700": {
-        "module": "NM-1E",
-        "ports_per_module": 1,
-        "first_configurable": 1,
-        "max_slots": 1,
-    },
-}
-
-# Fallback for any unrecognised Dynamips platform
-DYNAMIPS_FALLBACK: Dict[str, Any] = {
-    "module": "PA-8E",
-    "ports_per_module": 8,
-    "first_configurable": 1,
-    "max_slots": 4,
-}
-
-# ── Tier 1a (serial): Dynamips serial module catalogue ────────────────────────
-# Serial modules provide WAN interfaces (Serial0/0, Serial1/0, etc.)
-# Used when link_type == "serial" in the topology.
-#
-# Same structure as DYNAMIPS_SLOT_MODULES but for serial (WAN) interfaces.
-# Injected into slotN when the adapter's links are serial rather than Ethernet.
-DYNAMIPS_SERIAL_MODULES: Dict[str, Dict[str, Any]] = {
-    "c7200": {
-        "module": "PA-4T+",
-        "ports_per_module": 4,
-        "first_configurable": 1,
-        "max_slots": 6,
-    },
-    "c3745": {
-        "module": "NM-4T",
-        "ports_per_module": 4,
-        "first_configurable": 1,
-        "max_slots": 4,
-    },
-    "c3725": {
-        "module": "NM-4T",
-        "ports_per_module": 4,
-        "first_configurable": 1,
-        "max_slots": 2,
-    },
-    "c3660": {
-        "module": "NM-4T",
-        "ports_per_module": 4,
-        "first_configurable": 1,
-        "max_slots": 6,
-    },
-    "c3640": {
-        "module": "NM-4T",
-        "ports_per_module": 4,
-        "first_configurable": 1,
-        "max_slots": 4,
-    },
-    "c3620": {
-        "module": "NM-1T",
-        "ports_per_module": 1,
-        "first_configurable": 1,
-        "max_slots": 2,
-    },
-    "c2691": {
-        "module": "NM-4T",
-        "ports_per_module": 4,
-        "first_configurable": 1,
-        "max_slots": 1,
-    },
-    "c2600": {
-        "module": "NM-1T",
-        "ports_per_module": 1,
-        "first_configurable": 1,
-        "max_slots": 1,
-    },
-    "c1700": {
-        "module": "NM-1T",
-        "ports_per_module": 1,
-        "first_configurable": 1,
-        "max_slots": 1,
-    },
-}
-
-DYNAMIPS_SERIAL_FALLBACK: Dict[str, Any] = {
-    "module": "PA-4T+",
-    "ports_per_module": 4,
-    "first_configurable": 1,
-    "max_slots": 4,
-}
-
-# ── Dynamips built-in Ethernet port counts ────────────────────────────────────
-# Integrated ports on the NPE / motherboard, NOT in a slot.
-# Conservative: under-estimating here is safe (extra slot is harmless);
-#               over-estimating would be dangerous (missing a needed slot).
-DYNAMIPS_BUILTIN_PORTS: Dict[str, int] = {
-    "c7200": 1,   # FastEthernet0/0 on NPE
-    "c3745": 2,   # FastEthernet0/0, FastEthernet0/1
-    "c3725": 2,
-    "c3660": 2,   # Leopard-2FE provides 2 FastEthernet ports
-    "c3640": 0,   # NM-only, no built-in Ethernet
-    "c3620": 0,
-    "c2691": 2,
-    "c2600": 1,
-    "c1700": 1,
-}
-DYNAMIPS_BUILTIN_DEFAULT = 1  # assume at least 1 if platform unknown
-
-# ── Dynamips built-in Serial port counts ──────────────────────────────────────
-# Most platforms have 0 built-in serial — serial requires expansion modules.
-DYNAMIPS_BUILTIN_SERIAL_PORTS: Dict[str, int] = {
-    "c7200": 0,
-    "c3745": 0,
-    "c3725": 0,
-    "c3660": 0,
-    "c3640": 0,
-    "c3620": 0,
-    "c2691": 0,
-    "c2600": 0,
-    "c1700": 0,
-}
-
-# ── Dynamips interface name resolution ────────────────────────────────────────
-# Maps module name → {prefix, count} so resolve_port_name() can produce
-# "Serial1/0" instead of "Ethernet1/0" for serial modules, or
-# "FastEthernet0/0" for built-in ports.
-#
-# This is the UNIFIED module interface catalogue — both Ethernet and serial.
-# Previously split across hw_config.py (serial only) and context_builder.py
-# (Ethernet only).  Now consolidated here as the single source of truth.
-
-DYNAMIPS_MODULE_INTERFACES: Dict[str, Dict[str, Any]] = {
-    # ── Ethernet modules ──
-    "PA-8E":      {"prefix": "Ethernet",        "count": 8},
-    "PA-4E":      {"prefix": "Ethernet",        "count": 4},
-    "PA-FE-TX":   {"prefix": "FastEthernet",    "count": 1},
-    "PA-2FE-TX":  {"prefix": "FastEthernet",    "count": 2},
-    "PA-GE":      {"prefix": "GigabitEthernet", "count": 1},
-    "NM-4E":      {"prefix": "Ethernet",        "count": 4},
-    "NM-1E":      {"prefix": "Ethernet",        "count": 1},
-    "NM-1FE-TX":  {"prefix": "FastEthernet",    "count": 1},
-    "NM-16ESW":   {"prefix": "FastEthernet",    "count": 16},
-    "GT96100-FE": {"prefix": "FastEthernet",    "count": 2},
-    # ── Serial modules ──
-    "PA-4T+":     {"prefix": "Serial",          "count": 4},
-    "PA-8T":      {"prefix": "Serial",          "count": 8},
-    "NM-4T":      {"prefix": "Serial",          "count": 4},
-    "NM-1T":      {"prefix": "Serial",          "count": 1},
-}
-
 # Convenience subset: serial module names only (used by _inject_dynamips_slots
 # to classify existing modules as serial vs Ethernet).
 DYNAMIPS_SERIAL_MODULE_NAMES: frozenset = frozenset(
     name for name, info in DYNAMIPS_MODULE_INTERFACES.items()
     if info["prefix"] == "Serial"
 )
-
-# ── Dynamips built-in interface details ───────────────────────────────────────
-# Rich version of DYNAMIPS_BUILTIN_PORTS: includes the interface name prefix
-# so context_builder can produce "FastEthernet0/0" instead of just counting ports.
-DYNAMIPS_BUILTIN_INTERFACE_DETAILS: Dict[str, Dict[str, Any]] = {
-    "c7200":  {"prefix": "FastEthernet", "count": 1},
-    "c3745":  {"prefix": "FastEthernet", "count": 2},
-    "c3725":  {"prefix": "FastEthernet", "count": 2},
-    "c3660":  {"prefix": "FastEthernet", "count": 2},
-    "c3640":  {"prefix": None,           "count": 0},
-    "c3620":  {"prefix": None,           "count": 0},
-    "c2691":  {"prefix": "FastEthernet", "count": 2},
-    "c2600":  {"prefix": "FastEthernet", "count": 1},
-    "c1700":  {"prefix": "FastEthernet", "count": 1},
-}
 
 # ── Cross-catalogue module → ports_per_module lookup ─────────────────────────
 # Used by _inject_dynamips_slots to determine the actual port count of an
@@ -290,44 +82,6 @@ for _plat, _cfg in DYNAMIPS_SERIAL_MODULES.items():
 for _mod, _info in DYNAMIPS_MODULE_INTERFACES.items():
     if _mod not in _MODULE_PORT_COUNT:
         _MODULE_PORT_COUNT[_mod] = _info["count"]
-
-# ── Tier 1a: IOU adapter configuration ─────────────────────────────────────
-# GNS3 IOU uses count-based properties, NOT slot-based like Dynamips.
-#   ethernet_adapters  — integer (0-16, default 2), each provides 4 ports
-#   serial_adapters    — integer (0-16, default 2), each provides 4 ports
-#
-# Ref: gns3server/schemas/iou_template.py
-#      gns3server/compute/iou/iou_vm.py
-IOU_PORTS_PER_ADAPTER = 4    # Each IOU adapter (Ethernet or Serial) provides 4 ports
-IOU_MAX_ADAPTERS = 16        # Maximum adapters per type (ethernet or serial)
-IOU_DEFAULT_ETH_ADAPTERS = 2 # Default Ethernet adapters in GNS3 templates
-IOU_DEFAULT_SER_ADAPTERS = 2 # Default Serial adapters in GNS3 templates
-
-# ── Tier 1c: Built-in ports for switch / hub ────────────────────────────────
-SWITCH_HUB_DEFAULT_PORTS = 8
-
-# ── Tier 2: Immutable single-port nodes ─────────────────────────────────────
-IMMUTABLE_PORT_COUNT: Dict[str, int] = {
-    "vpcs": 1,
-    "traceng": 1,
-    "nat": 1,
-}
-IMMUTABLE_TYPES = frozenset(IMMUTABLE_PORT_COUNT.keys())
-
-# ── Tier 3: Mapping-based nodes ─────────────────────────────────────────────
-MAPPING_BASED_TYPES = frozenset(["frame_relay_switch", "atm_switch"])
-
-# ── Node type classification sets (shared across modules) ───────────────────
-# Used by context_builder, topology_finalizer, and config_agent.
-L2_CONCENTRATOR_TYPES: frozenset = frozenset(["ethernet_switch", "ethernet_hub"])
-L3_ROUTER_TYPES: frozenset = frozenset([
-    "dynamips", "iou", "qemu", "docker", "virtualbox", "vmware",
-])
-NO_CONFIG_TYPES: frozenset = frozenset([
-    "ethernet_switch", "ethernet_hub", "nat", "cloud",
-    "frame_relay_switch", "atm_switch",
-])
-
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  Helper: count how many links attach to each node

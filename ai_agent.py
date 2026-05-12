@@ -22,6 +22,7 @@ from typing import Optional
 
 from dotenv import load_dotenv
 
+from constants.ai import DYNAMIPS_MAX_LINKS, MAX_RETRIES, SINGLE_LINK_TYPES
 from hw_config import inject_hardware_config
 from llm_utils import _call_with_retry, _extract_json, _get_client
 from port_assigner import build_topology_from_request
@@ -34,21 +35,11 @@ logger = logging.getLogger("structranet.ai_agent")
 
 DEFAULT_MODEL = os.getenv("AI_MODEL", "openrouter/owl-alpha")
 MAX_TOKENS = int(os.getenv("AI_MAX_TOKENS", "8192"))
-MAX_RETRIES = 3
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  Step 1 prompt: nodes + connections only
 # ═══════════════════════════════════════════════════════════════════════════════
-
-# Hardware port limits — shown to LLM only to prevent topologically impossible
-# designs (e.g. 10 links to a c7200).  Port NUMBERS are not the LLM's concern.
-_DYNAMIPS_MAX_LINKS = {
-    "c7200": 3, "c3745": 6, "c3725": 6, "c3660": 5,
-    "c3640": 4, "c3620": 4, "c2691": 6, "c2600": 2, "c1700": 2,
-}
-_SINGLE_LINK_TYPES = {"vpcs", "traceng", "nat"}
-
 
 def _build_step1_prompt(devices: list[dict]) -> str:
     inventory = [
@@ -63,11 +54,11 @@ def _build_step1_prompt(devices: list[dict]) -> str:
         gtype = d["gns3_type"]
         name = d["name"]
         pc = d.get("port_count")
-        if gtype in _SINGLE_LINK_TYPES:
+        if gtype in SINGLE_LINK_TYPES:
             limit_lines.append(f"  - {name} ({gtype}): MAX 1 link. Insert a switch if more needed.")
         elif gtype == "dynamips":
             platform = name.lower()
-            max_l = _DYNAMIPS_MAX_LINKS.get(platform, 3)
+            max_l = DYNAMIPS_MAX_LINKS.get(platform, 3)
             limit_lines.append(
                 f"  - {name} (dynamips): MAX {max_l} total links (PCI bus limit). "
                 f"Use Core-SW + Router-on-a-Stick if you need more subnets."
