@@ -4,16 +4,11 @@ Structranet AI — Topology Schema
 Pydantic models defining the contract between the AI agent and the
 port_assigner / hw_config / config_agent pipeline.
 
-V3.0 changelog:
-  - REMOVED all autofix validators (autofix_dynamips_port_assignments,
-    autofix_switch_adapter_assignments, naming_switch_consistency).
-    Port assignment is now done deterministically by port_assigner.py —
-    the LLM never produces adapter/port numbers directly.
-  - All validators are hard errors, not silent corrections.
-  - Added TopologyRequest / Connection / NodeRequest for the two-step LLM
-    pipeline (nodes first, then connections, then ports computed by code).
-  - validate_topology() returns a list of error strings instead of raising,
-    so the retry loop can feed errors back to the LLM.
+V3.1 changelog:
+  - FIX (Bug 6): no_duplicate_connections now keys on (frozenset({a,b}), link_type)
+    instead of frozenset({a,b}) alone.  This allows one ethernet AND one serial
+    link between the same router pair, which is a valid WAN design pattern.
+    Source: GNS3 has no schema restriction on parallel links of different types.
 """
 
 from pydantic import BaseModel, Field, model_validator
@@ -28,11 +23,7 @@ _schema_logger = logging.getLogger("structranet.schema")
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class Connection(BaseModel):
-    """A logical connection request produced by the LLM.
-
-    The LLM only says "connect R1 to SW1 via ethernet."
-    port_assigner.py computes the correct adapter/port numbers.
-    """
+    """A logical connection request produced by the LLM."""
     from_node: str = Field(..., description="node_id of one endpoint")
     to_node: str = Field(..., description="node_id of the other endpoint")
     link_type: Literal["ethernet", "serial"] = "ethernet"
@@ -58,10 +49,7 @@ class NodeRequest(BaseModel):
 
 
 class TopologyRequest(BaseModel):
-    """Complete step-1 LLM output: device list + logical connections.
-
-    No port numbers — those are assigned deterministically by port_assigner.py.
-    """
+    """Complete step-1 LLM output: device list + logical connections."""
     name: str = Field(..., min_length=1, description="GNS3 project name")
     nodes: List[NodeRequest] = Field(..., min_length=1)
     connections: List[Connection] = Field(default_factory=list)
@@ -92,15 +80,20 @@ class TopologyRequest(BaseModel):
 
     @model_validator(mode="after")
     def no_duplicate_connections(self):
-        seen: set[frozenset] = set()
+        # FIX (Bug 6): Key on (frozenset({a,b}), link_type) so that one ethernet
+        # AND one serial link between the same router pair are both accepted.
+        # This is a valid WAN design pattern (e.g. ethernet for LAN, serial for WAN).
+        # Previously keyed on frozenset({a,b}) alone, which wrongly rejected it.
+        seen: set[tuple] = set()
         for c in self.connections:
-            pair = frozenset([c.from_node, c.to_node])
-            if pair in seen:
+            key = (frozenset([c.from_node, c.to_node]), c.link_type)
+            if key in seen:
                 raise ValueError(
-                    f"Duplicate connection between '{c.from_node}' and '{c.to_node}'. "
-                    f"Each pair may have at most one direct link."
+                    f"Duplicate {c.link_type} connection between "
+                    f"'{c.from_node}' and '{c.to_node}'. "
+                    f"Each pair may have at most one direct link per link type."
                 )
-            seen.add(pair)
+            seen.add(key)
         return self
 
     @model_validator(mode="after")
@@ -203,10 +196,6 @@ class Topology(BaseModel):
         "qemu", "docker", "virtualbox", "vmware",
     ])
     _MAX_EXPANDABLE_PORTS: ClassVar[dict[str, int]] = {
-        # dynamips is intentionally absent — use _DYNAMIPS_MAX_PORTS[platform]
-        # via template_name lookup in link_count_must_not_exceed_max_ports.
-        # A fallback of 3 was wrong because it fired pre-hw-injection when
-        # properties is empty and rejected valid 4-6 link topologies.
         "iou": 16, "qemu": 8, "docker": 8,
         "virtualbox": 8, "vmware": 10,
         "ethernet_switch": 128, "ethernet_hub": 128,
@@ -244,15 +233,20 @@ class Topology(BaseModel):
 
     @model_validator(mode="after")
     def no_duplicate_links(self):
-        seen_pairs: set[frozenset] = set()
+        # FIX (Bug 6): Allow one ethernet + one serial link between the same pair.
+        # Key on (frozenset({a,b}), link_type) to match the TopologyRequest fix.
+        seen_pairs: set[tuple] = set()
         for link in self.links:
-            pair = frozenset([link.nodes[0].node_id, link.nodes[1].node_id])
-            if pair in seen_pairs:
+            key = (
+                frozenset([link.nodes[0].node_id, link.nodes[1].node_id]),
+                link.link_type,
+            )
+            if key in seen_pairs:
                 raise ValueError(
-                    f"Duplicate link between '{link.nodes[0].node_id}' "
-                    f"and '{link.nodes[1].node_id}'"
+                    f"Duplicate {link.link_type} link between "
+                    f"'{link.nodes[0].node_id}' and '{link.nodes[1].node_id}'"
                 )
-            seen_pairs.add(pair)
+            seen_pairs.add(key)
         return self
 
     @model_validator(mode="after")
@@ -333,18 +327,13 @@ class Topology(BaseModel):
 
             max_ports = self._MAX_EXPANDABLE_PORTS.get(ntype)
             if ntype == "dynamips":
-                # Try properties["platform"] first (set after hw injection),
-                # then template_name (always present, often IS the platform).
-                # Fall back to the most permissive safe value (6) so that
-                # valid topologies are not rejected pre-injection when
-                # properties is still empty.
                 platform = (
                     str(node.properties.get("platform", "")).lower()
                     or str(node.template_name).lower()
                 )
                 max_ports = self._DYNAMIPS_MAX_PORTS.get(
                     platform,
-                    max(self._DYNAMIPS_MAX_PORTS.values()),  # 6 — most permissive
+                    max(self._DYNAMIPS_MAX_PORTS.values()),
                 )
 
             if max_ports is None:
@@ -443,7 +432,6 @@ class GNS3Project(BaseModel):
 # ── Soft validation helpers ────────────────────────────────────────────────────
 
 def validate_topology_request(data: dict) -> list[str]:
-    """Validate a TopologyRequest dict. Returns list of error strings (empty = valid)."""
     errors: list[str] = []
     try:
         TopologyRequest.model_validate(data)
@@ -458,7 +446,6 @@ def validate_topology_request(data: dict) -> list[str]:
 
 
 def validate_topology(data: dict) -> list[str]:
-    """Validate a GNS3Project dict. Returns list of error strings (empty = valid)."""
     errors: list[str] = []
     try:
         GNS3Project.model_validate(data)

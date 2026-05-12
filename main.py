@@ -2,11 +2,12 @@
 Structranet AI — Grand Orchestrator (Main Entry Point)
 
 Offline export pipeline:
-  [1/5] Load catalog       → appliance_catalog.load_catalog (static appliance definitions)
-  [2/5] User input         → CLI / interactive prompt
-  [3/5] AI topology        → ai_agent.generate_network_topology (Phase 1: structure, properties={})
-  [4/5] Hardware injection → ai_agent.process_and_save_topology (Phase 1: slots, adapters, ports_mapping)
-  [5/5] Software configs   → config_agent.run_phase2           (Phase 2: IPs, routing, startup scripts)
+  [1/6] Load catalog
+  [2/6] User input
+  [3/6] AI topology (Phase 1)
+  [4/6] Hardware injection
+  [5/6] Software configs (Phase 2)
+  [6/6] GNS3 Export & Validation
 
 Output: final_topology.json ready for .gns3project export.
 

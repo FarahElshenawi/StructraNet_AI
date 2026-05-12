@@ -62,12 +62,22 @@ logger = logging.getLogger("structranet.hw_config")
 # ═══════════════════════════════════════════════════════════════════════════════
 #  Constants — adapter limits, module mappings, built-in port counts
 # ═══════════════════════════════════════════════════════════════════════════════
+
+# FIX (Bug 1): DYNAMIPS_SERIAL_MODULE_INTERFACES was imported by context_builder.py
+# but never defined here.  Added as an alias to DYNAMIPS_MODULE_INTERFACES filtered
+# to serial modules only — same data, explicit name that context_builder expects.
+#
+# Source: gns3-gui/settings.py + constants/hardware.py DYNAMIPS_MODULE_INTERFACES
+# Serial modules are those whose prefix is "Serial".
+DYNAMIPS_SERIAL_MODULE_INTERFACES: Dict[str, Dict[str, Any]] = {
+    name: info
+    for name, info in DYNAMIPS_MODULE_INTERFACES.items()
+    if info["prefix"] == "Serial"
+}
+
 # Convenience subset: serial module names only (used by _inject_dynamips_slots
 # to classify existing modules as serial vs Ethernet).
-DYNAMIPS_SERIAL_MODULE_NAMES: frozenset = frozenset(
-    name for name, info in DYNAMIPS_MODULE_INTERFACES.items()
-    if info["prefix"] == "Serial"
-)
+DYNAMIPS_SERIAL_MODULE_NAMES: frozenset = frozenset(DYNAMIPS_SERIAL_MODULE_INTERFACES.keys())
 
 # ── Cross-catalogue module → ports_per_module lookup ─────────────────────────
 # Used by _inject_dynamips_slots to determine the actual port count of an
@@ -88,14 +98,7 @@ for _mod, _info in DYNAMIPS_MODULE_INTERFACES.items():
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _compute_link_stats(links: List[Dict[str, Any]]) -> tuple:
-    """Single pass: link count, max port number, max adapter per node.
-
-    Replaces three separate O(N) passes over the same links list with a
-    single O(N) pass that computes all three stats simultaneously.
-
-    Returns:
-        (link_counts, max_port_map, max_adapters) tuple
-    """
+    """Single pass: link count, max port number, max adapter per node."""
     counts: Dict[str, int] = {}
     max_ports: Dict[str, int] = {}
     max_adapters: Dict[str, int] = {}
@@ -209,15 +212,7 @@ def _inject_dynamips_slots(
     adapter_link_types: Optional[Dict[int, str]] = None,
     link_counts_by_type: Optional[Dict[str, int]] = None,
 ) -> None:
-    """Expand Dynamips slots based on the platform's module catalogue.
-
-    V2.0 BUG FIX: When a slot is already occupied, the port count is
-    looked up from the _MODULE_PORT_COUNT cross-catalogue (which combines
-    both Ethernet and serial module port counts), NOT from the would-be-
-    injected module config.  This prevents miscounting when a pre-existing
-    module has a different port count than the default for the current
-    link_type.
-    """
+    """Expand Dynamips slots based on the platform's module catalogue."""
     platform = _identify_dynamips_platform(node, properties)
     eth_config = DYNAMIPS_SLOT_MODULES.get(platform, DYNAMIPS_FALLBACK)
     ser_config = DYNAMIPS_SERIAL_MODULES.get(platform, DYNAMIPS_SERIAL_FALLBACK)
@@ -270,7 +265,6 @@ def _inject_dynamips_slots(
         ports_per = mod_config["ports_per_module"]
 
         if slot_key in properties:
-            # ── BUG FIX (V2.0): Use the ACTUAL existing module's port count ──
             existing_module = properties[slot_key]
             actual_ports = _MODULE_PORT_COUNT.get(existing_module, ports_per)
             is_serial_module = existing_module in DYNAMIPS_SERIAL_MODULE_NAMES
@@ -279,8 +273,7 @@ def _inject_dynamips_slots(
             else:
                 eth_covered += actual_ports
             logger.debug(
-                "Node %s (%s): %s already set to '%s', counting %d %s ports "
-                "(actual_ports from catalogue, not from mod_config)",
+                "Node %s (%s): %s already set to '%s', counting %d %s ports",
                 node.get("node_id"), platform,
                 slot_key, existing_module, actual_ports,
                 "serial" if is_serial_module else "Ethernet",
@@ -326,29 +319,20 @@ def _inject_iou_slots(
     required_ports: int, min_adapter_slots: int = 0,
     link_counts_by_type: Optional[Dict[str, int]] = None,
 ) -> None:
-    """Expand IOU adapter counts based on link requirements.
-
-    GNS3 IOU uses count-based properties (ethernet_adapters, serial_adapters),
-    NOT slot-based properties like Dynamips. Each adapter provides 4 ports.
-    """
+    """Expand IOU adapter counts based on link requirements."""
     lt_counts = link_counts_by_type or {}
     eth_required = lt_counts.get("ethernet", required_ports)
     ser_required = lt_counts.get("serial", 0)
 
-    # Current values (from template defaults or previous injection)
     current_eth = int(properties.get("ethernet_adapters", IOU_DEFAULT_ETH_ADAPTERS))
     current_ser = int(properties.get("serial_adapters", IOU_DEFAULT_SER_ADAPTERS))
 
-    # Compute needed adapters: ceil(ports / IOU_PORTS_PER_ADAPTER)
     needed_eth = min(math.ceil(eth_required / IOU_PORTS_PER_ADAPTER), IOU_MAX_ADAPTERS)
     needed_ser = min(math.ceil(ser_required / IOU_PORTS_PER_ADAPTER), IOU_MAX_ADAPTERS)
 
-    # Only increase, never decrease (template may have defaults we shouldn't remove)
     new_eth = max(current_eth, needed_eth)
     new_ser = max(current_ser, needed_ser)
 
-    # ALWAYS set the properties explicitly — ensures the PUT request includes
-    # the correct adapter counts even when they match template defaults.
     properties["ethernet_adapters"] = new_eth
     properties["serial_adapters"] = new_ser
 
@@ -360,7 +344,6 @@ def _inject_iou_slots(
         current_eth, new_eth, current_ser, new_ser,
     )
 
-    # Warn if we couldn't meet demand
     total_eth_ports = new_eth * IOU_PORTS_PER_ADAPTER
     total_ser_ports = new_ser * IOU_PORTS_PER_ADAPTER
     if total_eth_ports < eth_required:
@@ -415,9 +398,6 @@ def _inject_adapter_count(node: Dict[str, Any], required_ports: int) -> None:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _make_switch_port(index: int) -> Dict[str, Any]:
-    # GNS3 server source (ethernet_switch.py) always rewrites port_number
-    # to 0-based sequentially regardless of what we send, so we send 0-based
-    # to keep link endpoint port_numbers consistent with what the server stores.
     return {
         "name": f"Ethernet{index}",
         "port_number": index,
@@ -428,7 +408,6 @@ def _make_switch_port(index: int) -> Dict[str, Any]:
 
 
 def _make_hub_port(index: int) -> Dict[str, Any]:
-    # 0-based to match the GNS3 server's internal renumbering (same as switch).
     return {
         "name": f"Ethernet{index}",
         "port_number": index,
@@ -446,15 +425,12 @@ def _inject_ports_mapping(node: Dict[str, Any], required_ports: int) -> None:
     if existing_raw is not None:
         existing: List[Dict[str, Any]] = list(existing_raw)
 
-        # Normalize: GNS3 API v2 requires vlan >= 1 for ALL port types,
-        # including dot1q/trunk. A vlan of 0 causes 400 Bad Request on PUT.
         if any(p.get("vlan", 0) < 1 for p in existing):
             for port in existing:
                 if port.get("vlan", 0) < 1:
                     port["vlan"] = 1
             logger.info(
-                "Node %s (%s): normalized ports_mapping vlan values "
-                "to >= 1 (GNS3 requires vlan >= 1 for all port types)",
+                "Node %s (%s): normalized ports_mapping vlan values to >= 1",
                 node.get("node_id"), node_type,
             )
 
@@ -476,11 +452,9 @@ def _inject_ports_mapping(node: Dict[str, Any], required_ports: int) -> None:
 
         properties["ports_mapping"] = existing
         logger.info(
-            "Node %s (%s): %d links → ports_mapping expanded %d → %d "
-            "(target=max(%d links, %d default))",
+            "Node %s (%s): %d links → ports_mapping expanded %d → %d",
             node.get("node_id"), node_type,
             required_ports, current_count, len(existing),
-            required_ports, SWITCH_HUB_DEFAULT_PORTS,
         )
     else:
         full_mapping: List[Dict[str, Any]] = []
@@ -492,11 +466,9 @@ def _inject_ports_mapping(node: Dict[str, Any], required_ports: int) -> None:
 
         properties["ports_mapping"] = full_mapping
         logger.info(
-            "Node %s (%s): %d links → explicit ports_mapping created "
-            "(%d ports = max(%d links, %d default))",
+            "Node %s (%s): %d links → explicit ports_mapping created (%d ports)",
             node.get("node_id"), node_type,
             required_ports, len(full_mapping),
-            required_ports, SWITCH_HUB_DEFAULT_PORTS,
         )
 
 
@@ -542,9 +514,7 @@ def inject_hardware_config(topology_dict: Dict[str, Any]) -> Dict[str, Any]:
             if required > max_ports:
                 logger.warning(
                     "Node %s (%s): %d links requested but %s is "
-                    "hard-locked to %d port(s) — deployment WILL fail. "
-                    "Constrain the LLM prompt or add a Pydantic validator "
-                    "to reject multi-link %s nodes.",
+                    "hard-locked to %d port(s) — deployment WILL fail.",
                     node_id, node_type, required, node_type, max_ports,
                     node_type,
                 )
@@ -552,8 +522,7 @@ def inject_hardware_config(topology_dict: Dict[str, Any]) -> Dict[str, Any]:
         elif node_type in MAPPING_BASED_TYPES:
             logger.warning(
                 "Node %s (%s): uses the `mappings` paradigm, not port "
-                "counts — hardware injection not supported. If this node "
-                "has links, manual `mappings` configuration may be required.",
+                "counts — hardware injection not supported.",
                 node_id, node_type,
             )
 

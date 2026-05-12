@@ -4,3 +4,4 @@ output/
 *.gns3project
 *.log
 strut_offline/
+*.json
