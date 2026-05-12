@@ -55,25 +55,18 @@ APPLIANCE_NODE_TYPES = {"dynamips", "iou", "qemu", "docker", "virtualbox", "vmwa
 # Each platform supports specific modules in specific slots
 DYNAMIPS_COMPAT = {
     "c7200": {
-        "builtin_ifaces": 1,        # FastEthernet0/0 on PA-FE-TX in slot 0
+        "builtin_ifaces": 0,        # c7200 has no built-in, uses slot0 for I/O controller
         "slots": {
-            0: ["PA-FE-TX", "PA-2FE-TX", "PA-4E", "PA-8E", "PA-GE",
-                "PA-4T+", "PA-8T", "PA-A1", "PA-POS-OC3"],
-            1: ["PA-FE-TX", "PA-2FE-TX", "PA-4E", "PA-8E", "PA-GE",
-                "PA-4T+", "PA-8T", "PA-A1", "PA-POS-OC3"],
-            2: ["PA-FE-TX", "PA-2FE-TX", "PA-4E", "PA-8E", "PA-GE",
-                "PA-4T+", "PA-8T", "PA-A1", "PA-POS-OC3"],
-            3: ["PA-FE-TX", "PA-2FE-TX", "PA-4E", "PA-8E", "PA-GE",
-                "PA-4T+", "PA-8T", "PA-A1", "PA-POS-OC3"],
-            4: ["PA-FE-TX", "PA-2FE-TX", "PA-4E", "PA-8E", "PA-GE",
-                "PA-4T+", "PA-8T", "PA-A1", "PA-POS-OC3"],
-            5: ["PA-FE-TX", "PA-2FE-TX", "PA-4E", "PA-8E", "PA-GE",
-                "PA-4T+", "PA-8T", "PA-A1", "PA-POS-OC3"],
-            6: ["PA-FE-TX", "PA-2FE-TX", "PA-4E", "PA-8E", "PA-GE",
-                "PA-4T+", "PA-8T", "PA-A1", "PA-POS-OC3"],
+            0: ["C7200-IO-FE", "C7200-IO-2FE", "C7200-IO-GE-E"], # I/O Controllers ONLY
+            1: ["PA-FE-TX", "PA-2FE-TX", "PA-4E", "PA-8E", "PA-GE", "PA-4T+", "PA-8T", "PA-A1", "PA-POS-OC3"],
+            2: ["PA-FE-TX", "PA-2FE-TX", "PA-4E", "PA-8E", "PA-GE", "PA-4T+", "PA-8T", "PA-A1", "PA-POS-OC3"],
+            3: ["PA-FE-TX", "PA-2FE-TX", "PA-4E", "PA-8E", "PA-GE", "PA-4T+", "PA-8T", "PA-A1", "PA-POS-OC3"],
+            4: ["PA-FE-TX", "PA-2FE-TX", "PA-4E", "PA-8E", "PA-GE", "PA-4T+", "PA-8T", "PA-A1", "PA-POS-OC3"],
+            5: ["PA-FE-TX", "PA-2FE-TX", "PA-4E", "PA-8E", "PA-GE", "PA-4T+", "PA-8T", "PA-A1", "PA-POS-OC3"],
+            6: ["PA-FE-TX", "PA-2FE-TX", "PA-4E", "PA-8E", "PA-GE", "PA-4T+", "PA-8T", "PA-A1", "PA-POS-OC3"],
         },
-        "valid_images": [r"c7200.*\.bin"],
-        "ram_range": (256, 512),
+        "valid_images": [r"c7200.*\.image", r"c7200.*\.bin"],
+        "ram_range": (256, 1024),
     },
     "c3745": {
         "builtin_ifaces": 2,        # FastEthernet0/0 and FastEthernet0/1 (GT96100-FE)
@@ -81,6 +74,8 @@ DYNAMIPS_COMPAT = {
             0: ["GT96100-FE"],       # Fixed, not removable
             1: ["NM-1FE-TX", "NM-1E", "NM-4E", "NM-16ESW", "NM-4T", "NM-1T"],
             2: ["NM-1FE-TX", "NM-1E", "NM-4E", "NM-16ESW", "NM-4T", "NM-1T"],
+            3: ["NM-1FE-TX", "NM-1E", "NM-4E", "NM-16ESW", "NM-4T", "NM-1T"],
+            4: ["NM-1FE-TX", "NM-1E", "NM-4E", "NM-16ESW", "NM-4T", "NM-1T"],
         },
         "valid_images": [r"c3745.*\.bin"],
         "ram_range": (128, 512),
