@@ -148,7 +148,7 @@ def _is_uuid(s: str) -> bool:
 
 _SYMBOL: Dict[str, str] = {
     "dynamips":           ":/symbols/router.svg",
-    "iou":                ":/symbols/router.svg",
+    "iou":                ":/symbols/multilayer_switch.svg",  # IOU ≠ router; correct symbol
     "qemu":               ":/symbols/router.svg",
     "docker":             ":/symbols/docker_guest.svg",
     "vpcs":               ":/symbols/vpcs_guest.svg",
@@ -205,6 +205,28 @@ _LABEL_STYLE = (
     "fill-opacity: 1.0;"
 )
 
+# Per-type node dimensions matching GNS3 GUI defaults (Spec §7.3, Appendix A)
+# router/IOU: width=56 height=40 | VPCS/TraceNG: width=34 height=32 | others: 65x65
+_NODE_DIMENSIONS: Dict[str, Tuple[int, int]] = {
+    "dynamips":           (56, 40),
+    "iou":                (56, 40),
+    "vpcs":               (34, 32),
+    "traceng":            (34, 32),
+    "cloud":              (95, 65),
+    "nat":                (95, 65),
+}
+_DEFAULT_NODE_SIZE = (65, 65)
+
+# Per-type label offsets from node center (Spec §7.3)
+# router: x=-17, y=-25 | VPCS: x=-8, y=-22 | others: x=-10, y=-25
+_LABEL_OFFSET: Dict[str, Tuple[int, int]] = {
+    "dynamips":        (-17, -25),
+    "iou":             (-17, -25),
+    "vpcs":            (-8,  -22),
+    "traceng":         (-8,  -22),
+}
+_DEFAULT_LABEL_OFFSET = (-10, -25)
+
 # Appliance types that NEED template_id in the node object.
 # Built-in types must NOT have this key at all.
 _APPLIANCE_TYPES = frozenset(
@@ -247,6 +269,11 @@ _DYN_MODULE: Dict[str, Dict[str, Any]] = {
     "NM-1FE-TX":  {"prefix": "FastEthernet",     "count": 1},
     "NM-16ESW":   {"prefix": "FastEthernet",     "count": 16},
     "GT96100-FE": {"prefix": "FastEthernet",     "count": 2},
+    "Leopard-2FE":{"prefix": "FastEthernet",     "count": 2},  # c3745 motherboard
+    # c7200 I/O controllers (slot 0 ONLY — not interchangeable with PA-* modules)
+    "C7200-IO-FE":  {"prefix": "FastEthernet",   "count": 1},
+    "C7200-IO-2FE": {"prefix": "FastEthernet",   "count": 2},
+    "C7200-IO-GE-E":{"prefix": "GigabitEthernet","count": 1},
     "PA-4T+":     {"prefix": "Serial",           "count": 4},
     "PA-8T":      {"prefix": "Serial",           "count": 8},
     "NM-4T":      {"prefix": "Serial",           "count": 4},
@@ -260,15 +287,22 @@ _DYN_MODULE: Dict[str, Dict[str, Any]] = {
 # 'default_nm' is the module used for Ethernet expansion slots.
 # 'max_slots' is the highest slot index available.
 _DYN_HW_DEFAULTS: Dict[str, Dict[str, Any]] = {
-    "c7200": {"ram": 512,  "slot0": "PA-FE-TX",   "default_nm": "PA-8E",    "max_slots": 6},
-    "c3745": {"ram": 256,  "slot0": "GT96100-FE",  "default_nm": "NM-4E",    "max_slots": 2},
-    "c3725": {"ram": 256,  "slot0": "GT96100-FE",  "default_nm": "NM-4E",    "max_slots": 2},
-    "c3660": {"ram": 256,                          "default_nm": "NM-4E",    "max_slots": 5},
-    "c3640": {"ram": 256,                          "default_nm": "NM-4E",    "max_slots": 3},
-    "c3620": {"ram": 256,                          "default_nm": "NM-4E",    "max_slots": 1},
-    "c2691": {"ram": 256,  "slot0": "GT96100-FE",  "default_nm": "NM-4E",    "max_slots": 1},
-    "c2600": {"ram": 128,  "slot0": "NM-1FE-TX",   "default_nm": "NM-1E",    "max_slots": 1},
-    "c1700": {"ram": 128,  "slot0": "NM-1FE-TX",   "default_nm": "NM-1E",    "max_slots": 1},
+    # c7200: slot0 MUST be an I/O controller (C7200-IO-FE, C7200-IO-2FE, C7200-IO-GE-E)
+    # PA-* modules go in slots 1-6 ONLY. Using PA-FE-TX as slot0 is WRONG.
+    "c7200": {"ram": 512,  "slot0": "C7200-IO-FE",  "default_nm": "PA-8E",    "max_slots": 6},
+    # c3745: slot0 = Leopard-2FE (motherboard built-in, provides 2 FastEthernet)
+    # GT96100-FE is the c3725's built-in chip, NOT c3745's.
+    "c3745": {"ram": 256,  "slot0": "Leopard-2FE",  "default_nm": "NM-4E",    "max_slots": 2},
+    # c3725: slot0 = GT96100-FE (motherboard built-in, provides 2 FastEthernet)
+    "c3725": {"ram": 256,  "slot0": "GT96100-FE",   "default_nm": "NM-4E",    "max_slots": 2},
+    # c3660/c3640/c3620: NO fixed slot0 — all slots are user-configurable NM modules
+    "c3660": {"ram": 256,                            "default_nm": "NM-4E",    "max_slots": 5},
+    "c3640": {"ram": 256,                            "default_nm": "NM-4E",    "max_slots": 3},
+    "c3620": {"ram": 256,                            "default_nm": "NM-4E",    "max_slots": 1},
+    # c2691: slot0 = GT96100-FE (motherboard)
+    "c2691": {"ram": 256,  "slot0": "GT96100-FE",   "default_nm": "NM-4E",    "max_slots": 1},
+    "c2600": {"ram": 128,  "slot0": "NM-1FE-TX",    "default_nm": "NM-1E",    "max_slots": 1},
+    "c1700": {"ram": 128,  "slot0": "NM-1FE-TX",    "default_nm": "NM-1E",    "max_slots": 1},
 }
 
 # node_type → directory name inside the ZIP archive
@@ -284,12 +318,15 @@ _NODE_TYPE_DIR: Dict[str, str] = {
 
 # Config key → (node_type, ZIP subpath within the node's directory)
 # Full ZIP path: project-files/<node_type_dir>/<node_uuid>/<subpath>
+# CRITICAL: IOU config lives directly under the node UUID dir — no configs/ subdir.
+# Dynamips/QEMU use a configs/ subdirectory; IOU does NOT.
+# Source: gns3server/compute/iou/iou_vm.py vs gns3server/compute/dynamips/dynamips_vm.py
 _CONFIG_FILES: List[Tuple[str, str, str]] = [
     ("startup_config_content", "dynamips", "configs/startup-config.cfg"),
-    ("startup_config_content", "iou",      "configs/startup-config.cfg"),
+    ("startup_config_content", "iou",      "startup-config.cfg"),       # NO configs/ subdir
     ("startup_config_content", "qemu",     "configs/startup-config.cfg"),
     ("private_config_content", "dynamips", "configs/private-config.cfg"),
-    ("private_config_content", "iou",      "configs/private-config.cfg"),
+    ("private_config_content", "iou",      "private-config.cfg"),       # NO configs/ subdir
     ("startup_script",         "vpcs",     "startup.vpc"),
 ]
 
@@ -806,7 +843,8 @@ def convert(
         ntype = n.get("node_type", "")
         nuuid = node_uuid_map[nid]
         x, y  = positions.get(nid, (0, 0))
-        w, h  = _SIZE.get(ntype, _DEFAULT_SIZE)
+        w, h  = _NODE_DIMENSIONS.get(ntype, _DEFAULT_NODE_SIZE)
+        lx, ly = _LABEL_OFFSET.get(ntype, _DEFAULT_LABEL_OFFSET)
 
         # Apply user-supplied image override before hardware injection
         if ntype == "dynamips" and n.get("template_name") in image_map:
@@ -830,6 +868,16 @@ def convert(
                 uuid.uuid5(uuid.NAMESPACE_DNS, f"gns3-template-{template_name}")
             )
 
+        # Fix 5: IOU needs a specific port_name_format and port_segment_size
+        # so GNS3 renders interface labels correctly (Ethernet0/0 not Ethernet0).
+        # All other types use "Ethernet{0}" with segment_size=0.
+        if ntype == "iou":
+            port_name_format  = "Ethernet{segment0}/{port0}"
+            port_segment_size = 4
+        else:
+            port_name_format  = n.get("port_name_format", "Ethernet{0}")
+            port_segment_size = 0
+
         # Build the node object.
         # ONLY schema-allowed keys are included.
         # EXCLUDED (not in GNS3 node schema): console_auto_start, status
@@ -849,13 +897,14 @@ def convert(
             "symbol":           _SYMBOL.get(ntype, ":/symbols/computer.svg"),
             "label": {
                 "text":     n.get("name", nid),
-                "x":        label.get("x", -10),
-                "y":        label.get("y", -25),
+                "x":        label.get("x", lx),   # per-type offset
+                "y":        label.get("y", ly),
                 "rotation": 0,
                 "style":    _LABEL_STYLE,
             },
             "properties":       _clean_properties(n),
-            "port_name_format": n.get("port_name_format", "Ethernet{0}"),
+            "port_name_format": port_name_format,
+            "port_segment_size": port_segment_size,
             "first_port_name":  n.get("first_port_name"),
             "ports":            _build_ports(n, links_in),
         }
