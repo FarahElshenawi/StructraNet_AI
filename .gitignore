@@ -1,0 +1,6 @@
+__pycache__/
+.env
+output/
+*.gns3project
+*.log
+strut_offline/
