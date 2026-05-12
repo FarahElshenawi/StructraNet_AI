@@ -76,12 +76,9 @@ Structranet AI uses a **two-phase, multi-agent pipeline** that separates logical
 └────────────────────────│────────────────────────────────────────────┘
                          │
                          ▼
-              Project Enricher
-           (GNS3 object graph +
-            config file extraction)
-                         │
-                         ▼
               .gns3project ZIP Export
+              (GNS3 object graph +
+            config file extraction)
            (portable offline project)
 ```
 
@@ -107,7 +104,6 @@ The full pipeline runs in 5 steps via CLI or as an interactive Streamlit session
 ```
 structranet-ai/
 ├── main.py                     # Grand orchestrator — 5-step CLI pipeline
-├── app.py                      # Streamlit web UI (chat-based interface)
 │
 ├── ai_agent.py                 # Phase 1: LLM topology generation + edit mode
 ├── config_agent.py             # Phase 2: LLM software config generation
@@ -135,7 +131,6 @@ structranet-ai/
 | Module | Role | Key Functions |
 |--------|------|---------------|
 | `main.py` | Entry point & pipeline orchestration | `parse_args()`, `validate_against_inventory()`, `main()` |
-| `app.py` | Streamlit web interface | Chat UI, real-time log streaming, topology visualization |
 | `ai_agent.py` | LLM topology design | `generate_network_topology()`, `process_and_save_topology()`, `generate_edited_topology()` |
 | `config_agent.py` | LLM config generation | `run_phase2()`, `safe_merge_configs()` (Three-Gate Safe Merge) |
 | `schema.py` | Data contracts | `TopologyRequest`, `GNS3Project`, `validate_topology()`, `validate_topology_request()` |
@@ -186,11 +181,6 @@ python main.py --request "Build a campus network with 2 routers, a core switch, 
 
 # Skip Phase 2 (software configs)
 python main.py --request "3-router topology" --no-deploy --no-phase2
-```
-
-**Streamlit web UI:**
-```bash
-streamlit run app.py
 ```
 
 **Programmatic export:**
@@ -329,27 +319,6 @@ Every constant in `gns3_constants.py`, every Dynamips module in `hw_config.py`, 
 
 ---
 
-## Validation & Testing
-
-### Integration Tests
-
-`test_export_pipeline.py` exercises the complete export pipeline with three test topologies:
-
-1. **Simple P2P** — 2 Dynamips routers, 1 Ethernet link
-2. **Router-on-a-Stick** — 1 router, 1 core switch, 2 access switches, 4 VPCS, VLAN 10/20
-3. **4-Node Mesh** — 2 Dynamips + 2 IOU routers, 6 links
-
-Each test runs:
-```
-hw_config.inject_hardware_config()
-→ gns3_exporter.export_project()
-→ gns3_exporter.verify_archive()
-```
-
-```bash
-python test_export_pipeline.py
-```
-
 ### Structural Validator
 
 `gns3project_validator.py` performs 11 deep validation checks on any `.gns3project` file:
@@ -452,25 +421,6 @@ IOU (IOS on Unix) nodes use a different expansion model from Dynamips:
 - Expansion is count-based: `ethernet_adapters` and `serial_adapters` are integer properties
 - Maximum 16 adapters per type (`IOU_MAX_ADAPTERS = 16`)
 - Each IOU node requires a unique `application_id` integer
-
----
-
-## Streamlit Web Interface
-
-The `app.py` module provides a polished dark-themed chat interface for interactive topology design:
-
-- **Chat-based workflow**: Describe your network in natural language
-- **Real-time pipeline logs**: Watch each step execute with a streaming log terminal
-- **Topology visualization**: Interactive GraphViz diagram of the generated network
-- **Device table**: Tabular view of all nodes with config status
-- **JSON inspector**: Full topology JSON viewer
-- **Example prompts**: Pre-built suggestions to get started quickly
-
-```bash
-streamlit run app.py
-```
-
-The UI follows a "Confident Minimalism" design philosophy inspired by Linear.app — dark background, emerald green accents, Inter + JetBrains Mono typography, generous whitespace.
 
 ---
 
