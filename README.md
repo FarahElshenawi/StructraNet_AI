@@ -19,7 +19,6 @@ Structranet AI is an AI-powered virtual network engineer that transforms natural
 - [Validation & Testing](#validation--testing)
 - [Export Format](#export-format)
 - [Configuration Reference](#configuration-reference)
-- [Streamlit Web Interface](#streamlit-web-interface)
 - [Known Issues & Roadmap](#known-issues--roadmap)
 
 ---
@@ -40,7 +39,7 @@ Every constant, path format, and schema field has been validated against the **G
 
 ## Architecture
 
-Structranet AI uses a **two-phase, multi-agent pipeline** that separates logical design from physical configuration:
+Structranet AI uses a **two-phase pipeline** that separates logical design from physical configuration:
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -86,16 +85,19 @@ Structranet AI uses a **two-phase, multi-agent pipeline** that separates logical
 
 ## Pipeline
 
-The full CLI pipeline now runs in 6 steps:
+The full CLI pipeline now runs in 7 steps:
 
 | Step | Module | Description |
 |------|--------|-------------|
-| 1/6 | User input | CLI argument or interactive prompt |
-| 2/6 | `ai_agent` | LLM generates `TopologyRequest` (nodes + logical connections) |
-| 3/6 | `port_assigner` → `hw_config` | Deterministic port assignment + hardware slot injection |
-| 4/6 | `config_agent` | LLM generates software configs (IPs, routing, startup scripts); includes VLAN switch-port patching via `topology_finalizer` |
-| 5/6 | `gns3_exporter` | Convert final topology JSON to portable `.gns3project` ZIP |
-| 6/6 | `gns3project_validator` | Run 11 structural checks to ensure import safety |
+| 1/7 | User input | CLI argument or interactive prompt |
+| 2/7 | `preflight` | Load/collect environment profile (GNS3 version + supported node families) |
+| 3/7 | `ai_agent` | LLM generates `TopologyRequest` (nodes + logical connections), constrained by profile support |
+| 4/7 | `port_assigner` → `hw_config` | Deterministic port assignment + hardware slot injection |
+| 5/7 | `config_agent` | LLM generates software configs (IPs, routing, startup scripts); includes VLAN switch-port patching via `topology_finalizer` |
+| 6/7 | `gns3_exporter` | Convert final topology JSON to portable `.gns3project` ZIP |
+| 7/7 | `gns3project_validator` | Run 11 structural checks to ensure import safety |
+
+Before phase 2 and before final export, `main.py` presents a review checkpoint so the user can approve or stop.
 
 ---
 
@@ -103,7 +105,9 @@ The full CLI pipeline now runs in 6 steps:
 
 ```
 structranet-ai/
-├── main.py                     # Grand orchestrator — 6-step CLI pipeline
+├── main.py                     # Grand orchestrator — 7-step CLI pipeline
+│
+├── preflight.py                # Environment profile collection + compatibility gate
 │
 ├── ai_agent.py                 # Phase 1: LLM topology generation + edit mode
 ├── config_agent.py             # Phase 2: LLM software config generation
@@ -135,7 +139,8 @@ structranet-ai/
 
 | Module | Role | Key Functions |
 |--------|------|---------------|
-| `main.py` | Entry point & pipeline orchestration | `parse_args()`, `validate_against_inventory()`, `main()` |
+| `main.py` | Entry point & pipeline orchestration | `parse_args()`, `catalog_to_inventory()`, `main()` |
+| `preflight.py` | Environment readiness checks | `collect_profile_interactive()`, `check_topology_compatibility()` |
 | `ai_agent.py` | LLM topology design | `generate_network_topology()`, `process_and_save_topology()`, `generate_edited_topology()` |
 | `config_agent.py` | LLM config generation | `run_phase2()`, `safe_merge_configs()` (Three-Gate Safe Merge) |
 | `schema.py` | Data contracts | `TopologyRequest`, `GNS3Project`, `validate_topology()`, `validate_topology_request()` |
@@ -149,7 +154,7 @@ structranet-ai/
 | `constants/ai.py` | AI generation constants | `MAX_RETRIES`, prompt-side link-limit tables |
 | `constants/appliances.py` | Appliance defaults constants | `APPLIANCE_CATALOG` |
 | `appliance_catalog.py` | Template defaults | `get_appliance()`, `load_catalog()` with user overlay support |
-| `gns3_exporter.py` | ZIP packaging | `export_project()`, `export_topology()`, `verify_archive()` |
+| `gns3_exporter.py` | ZIP packaging | `convert()` |
 | `gns3project_validator.py` | Deep validation | `GNS3ProjectValidator` — 11 structural checks against GNS3 spec |
 
 ---
@@ -196,11 +201,17 @@ python main.py --request "3-router topology" --project-output output/my_lab.gns3
 
 # Skip validator (not recommended)
 python main.py --request "3-router topology" --no-validate
+
+# Use a saved preflight profile (non-interactive environment info)
+python main.py --request "3-router topology" --profile output/preflight_profile.json
+
+# Auto-approve interactive checkpoints
+python main.py --request "3-router topology" --yes
 ```
 
 **Programmatic export:**
 ```python
-from gns3_exporter import export_topology
+from gns3_exporter import convert
 
 # Load the final topology
 import json
@@ -208,7 +219,7 @@ with open("output/final_topology.json") as f:
     topology = json.load(f)
 
 # Export as .gns3project ZIP
-path = export_topology(topology, "my_network.gns3project")
+path = convert(topology, "my_network.gns3project")
 print(f"Exported to: {path}")
 # Import: GNS3 GUI → File → Import portable project
 ```
@@ -223,9 +234,11 @@ print(f"Exported to: {path}")
 |----------|-------|-------------|
 | `--request` | `-r` | Network description (skips interactive prompt) |
 | `--output` | `-o` | Output JSON file path |
+| `--profile` | | Path to preflight environment profile JSON |
 | `--no-phase2` | | Skip Phase 2 (software configuration generation) |
 | `--project-output` | | Output `.gns3project` path |
 | `--no-validate` | | Skip post-export structural validation |
+| `--yes` | | Auto-approve interactive checkpoints |
 
 ### Environment Variables
 

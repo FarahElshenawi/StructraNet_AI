@@ -27,6 +27,12 @@ from ai_agent import generate_network_topology, process_and_save_topology
 from gns3_exporter import convert as export_gns3project
 from gns3project_validator import GNS3ProjectValidator
 from hw_config import DYNAMIPS_BUILTIN_PORTS, DYNAMIPS_BUILTIN_DEFAULT, DYNAMIPS_SLOT_MODULES
+from preflight import (
+    check_topology_compatibility,
+    collect_profile_interactive,
+    load_profile,
+    save_profile,
+)
 from config_agent import run_phase2
 
 logger = logging.getLogger("structranet.main")
@@ -49,12 +55,16 @@ def parse_args():
                         help="Output JSON file path (default: output/final_topology.json)")
     parser.add_argument("--catalog", type=str, default=None,
                         help="Path to custom appliance catalog JSON overlay")
+    parser.add_argument("--profile", type=str, default=None,
+                        help="Path to preflight environment profile JSON")
     parser.add_argument("--no-phase2", action="store_true",
                         help="Skip Phase 2 (software configuration generation)")
     parser.add_argument("--project-output", type=str, default=None,
                         help="Output .gns3project path (default: output/<final_json_stem>.gns3project)")
     parser.add_argument("--no-validate", action="store_true",
                         help="Skip .gns3project structural validation")
+    parser.add_argument("--yes", action="store_true",
+                        help="Auto-approve generation without interactive confirmation")
     return parser.parse_args()
 
 
@@ -78,6 +88,53 @@ _MAX_EXPANDABLE_PORTS = {
     "virtualbox": 8, "vmware": 10,
     "ethernet_switch": 128, "ethernet_hub": 128,
 }
+
+
+def _build_design_review(
+    topology_dict: dict,
+    profile,
+    compatibility_issues: list[str],
+) -> tuple[list[str], list[str]]:
+    topo = topology_dict.get("topology", {})
+    nodes = topo.get("nodes", [])
+    links = topo.get("links", [])
+
+    node_types = sorted({str(n.get("node_type", "unknown")) for n in nodes})
+    counts_by_type = {}
+    for n in nodes:
+        ntype = str(n.get("node_type", "unknown"))
+        counts_by_type[ntype] = counts_by_type.get(ntype, 0) + 1
+
+    thoughts = [
+        f"Designed topology with {len(nodes)} node(s) and {len(links)} link(s).",
+        "Node type mix: " + ", ".join(
+            f"{k}={v}" for k, v in sorted(counts_by_type.items())
+        ),
+    ]
+
+    assumptions: list[str] = []
+    if "dynamips" in node_types:
+        assumptions.append(
+            "Dynamips images/templates on your machine match the selected catalog names."
+        )
+    if "iou" in node_types:
+        assumptions.append("IOU is available and licensed on your environment.")
+    if "qemu" in node_types:
+        assumptions.append("Required QEMU images exist on your machine.")
+    if "docker" in node_types:
+        assumptions.append("Docker is available and integrated with GNS3.")
+    if not assumptions:
+        assumptions.append("Built-in and selected node types are available on your machine.")
+
+    if not str(profile.gns3_version).startswith("2.2"):
+        assumptions.append(
+            f"GNS3 version '{profile.gns3_version}' may behave differently than expected 2.2.x."
+        )
+
+    if compatibility_issues:
+        assumptions.extend(compatibility_issues)
+
+    return thoughts, assumptions
 
 
 def catalog_to_inventory(catalog: dict) -> list[dict]:
@@ -158,17 +215,48 @@ def main():
         print("[ERR] No input. Exiting.")
         sys.exit(1)
 
-    # ── Step 3/5: Phase 1 — Logical topology generation ─────────────────────
-    print("\n[3/5] Phase 1 — AI generating logical topology...")
-    result = generate_network_topology(user_request, inventory)
+    # ── Step 2b/6: Preflight profile (environment compatibility) ─────────────
+    if args.profile:
+        try:
+            profile = load_profile(args.profile)
+            print(f"\n[Preflight] Loaded profile: {args.profile}")
+        except Exception as exc:
+            print(f"[ERR] Failed to load profile '{args.profile}': {exc}")
+            sys.exit(1)
+    else:
+        profile = collect_profile_interactive()
+        profile_path = os.path.join(OUTPUT_DIR, "preflight_profile.json")
+        save_profile(profile, profile_path)
+        print(f"[Preflight] Profile saved to: {profile_path}")
+
+    blocked_types = profile.unsupported_node_types
+    filtered_inventory = [
+        d for d in inventory
+        if str(d.get("gns3_type", "")).lower() not in blocked_types
+    ]
+    if not filtered_inventory:
+        print("[ERR] Profile blocks all available node types in inventory.")
+        sys.exit(1)
+
+    if len(filtered_inventory) != len(inventory):
+        blocked_list = ", ".join(sorted(blocked_types))
+        print(f"[Preflight] Filtering unsupported types from generation: {blocked_list}")
+
+    # ── Step 3/6: Phase 1 — Logical topology generation ─────────────────────
+    print("\n[3/6] Phase 1 — AI generating logical topology...")
+    result = generate_network_topology(
+        user_request,
+        filtered_inventory,
+        disallowed_node_types=blocked_types,
+    )
     if not result:
         print("[ERR] AI generation failed. Check your API key and model config.")
         sys.exit(1)
     print(f"  Generated {len(result.topology.nodes)} node(s), "
           f"{len(result.topology.links)} link(s)")
 
-    # ── Step 4/5: Phase 1 — Hardware injection + save ───────────────────────
-    print("\n[4/5] Phase 1 — Injecting hardware expansion (slots/adapters/ports)...")
+    # ── Step 4/6: Phase 1 — Hardware injection + save ───────────────────────
+    print("\n[4/6] Phase 1 — Injecting hardware expansion (slots/adapters/ports)...")
     phase1_file = os.path.join(OUTPUT_DIR, "_topology.json")
     enriched = process_and_save_topology(result, phase1_file)
     if not enriched:
@@ -178,11 +266,36 @@ def main():
 
     topo_dict = enriched.model_dump()
 
-    # ── Step 5/5: Phase 2 — Software configuration generation ───────────────
+    # Compatibility gate: block unsupported node types for this environment.
+    compatibility_issues = check_topology_compatibility(topo_dict, profile)
+    if compatibility_issues:
+        print("\n[Compatibility] Found environment issues:")
+        for issue in compatibility_issues:
+            print(f"  - {issue}")
+        if profile.strict_validation:
+            print("[ERR] Aborting due to strict preflight validation.")
+            sys.exit(1)
+        print("[WARN] Continuing (strict_validation=false).")
+
+    thoughts, assumptions = _build_design_review(topo_dict, profile, compatibility_issues)
+    print("\n[Design Review]")
+    for t in thoughts:
+        print(f"  - {t}")
+    print("  Assumptions / risks:")
+    for a in assumptions:
+        print(f"    * {a}")
+
+    if not args.yes:
+        confirm_design = input("Approve this design before software config generation? [Y/n] ").strip().lower()
+        if confirm_design in {"n", "no"}:
+            print("Stopped before Phase 2 at your request.")
+            sys.exit(0)
+
+    # ── Step 5/6: Phase 2 — Software configuration generation ───────────────
     final_file = args.output or os.path.join(OUTPUT_DIR, "final_topology.json")
 
     if args.no_phase2:
-        print("\n[5/5] Phase 2 — SKIPPED (--no-phase2 flag set)")
+        print("\n[5/6] Phase 2 — SKIPPED (--no-phase2 flag set)")
         # Use Phase 1 output as the final topology
         final_dict = topo_dict
         # Save it as final
@@ -190,7 +303,7 @@ def main():
             json.dump(final_dict, f, indent=2)
         print(f"  Phase 1 output saved as final: {final_file}")
     else:
-        print("\n[5/5] Phase 2 — Generating software configurations (IP/routing/startup)...")
+        print("\n[5/6] Phase 2 — Generating software configurations (IP/routing/startup)...")
         final_dict = run_phase2(phase1_file, final_file)
         if final_dict is None:
             print("[WARN] Phase 2 failed — falling back to Phase 1 topology (no software configs).")
@@ -216,6 +329,13 @@ def main():
     print(f"\n  Summary: {node_count} node(s), {link_count} link(s), "
           f"{configured} node(s) with software configs")
     print(f"  Output: {final_file}")
+
+    if not args.yes:
+        print("\nDesign looks ready. I can now generate the final .gns3project.")
+        confirm = input("Proceed with export and validation? [Y/n] ").strip().lower()
+        if confirm in {"n", "no"}:
+            print("Stopped before export at your request.")
+            sys.exit(0)
 
     # ── Export: final_topology.json → .gns3project ───────────────────────────
     print("\n[6/6] Exporting portable GNS3 project (.gns3project)...")

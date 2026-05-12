@@ -18,7 +18,7 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Set
 
 from dotenv import load_dotenv
 
@@ -175,7 +175,9 @@ def _call_step1(
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def generate_network_topology(
-    user_request: str, devices: list[dict]
+    user_request: str,
+    devices: list[dict],
+    disallowed_node_types: Optional[Set[str]] = None,
 ) -> Optional[GNS3Project]:
     """
     Generate a GNS3Project from a natural language request.
@@ -187,6 +189,7 @@ def generate_network_topology(
       4. If errors → feed back to LLM and retry (max MAX_RETRIES times)
     """
     previous_errors: list[str] = []
+    disallowed = {t.lower() for t in (disallowed_node_types or set())}
 
     for attempt in range(1, MAX_RETRIES + 1):
         logger.info("Generation attempt %d/%d", attempt, MAX_RETRIES)
@@ -199,6 +202,19 @@ def generate_network_topology(
 
         # Step 2: Validate the topology request
         req_errors = validate_topology_request(topo_request.model_dump())
+        if not req_errors and disallowed:
+            disallowed_hits = []
+            for n in topo_request.nodes:
+                ntype = str(n.node_type).lower()
+                if ntype in disallowed:
+                    disallowed_hits.append(
+                        f"node '{n.node_id}' uses disallowed node_type '{ntype}'"
+                    )
+            if disallowed_hits:
+                req_errors = [
+                    "Environment compatibility violation: "
+                    + "; ".join(disallowed_hits)
+                ]
         if req_errors:
             logger.warning("TopologyRequest validation failed: %s", req_errors)
             previous_errors = req_errors
