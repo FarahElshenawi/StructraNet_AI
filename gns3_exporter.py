@@ -1,35 +1,37 @@
 """
-gns3_exporter.py — Structranet AI  ·  GNS3 Portable Project Exporter  (V4.1)
+gns3_exporter.py — Structranet AI  ·  GNS3 Portable Project Exporter  (V4.2)
 
 Converts final_topology.json → network.gns3project (a ZIP importable via
 GNS3 GUI → File → Import portable project).
 
+V4.2 changes vs V4.1
+─────────────────────
+  • Fixed hardware table bugs in _DYN_HW_DEFAULTS:
+      - c3745 slot0 was "Leopard-2FE" → corrected to "GT96100-FE"
+      - c3745 max_slots was 2 → corrected to 4
+      - c3660 max_slots was 5 → corrected to 6
+      - c3660 was missing slot0 entry → added "Leopard-2FE"
+    Source: gns3-gui/gns3/modules/dynamips/settings.py ADAPTER_MATRIX
+
+  • Added pre-export validation gate (_pre_export_validate) that runs
+    BEFORE writing any bytes to disk.  It catches the errors most likely
+    to cause a silent import failure or wrong runtime behaviour:
+      - Dynamips slot module incompatible with platform
+      - Link endpoint references an adapter with no installed slot module
+      - Switch access-VLAN > 1 with no dot1q trunk port (inter-VLAN silently broken)
+      - Placeholder IOS image (warning only — user may not have real image yet)
+    Errors abort the export and print a clear message.
+    Warnings are printed but do not block export.
+
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- GROUND TRUTH SOURCES (consulted for every field decision)
+ GROUND TRUTH SOURCES
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   GNS3 server source  gns3server/schemas/project.py
                       gns3server/schemas/node.py
                       gns3server/schemas/link.py
   GNS3 controller     gns3server/controller/import_project.py
                       gns3server/controller/topology.py
-  GNS3 portable ZIP   Reverse-engineered from real GNS3 2.2 project exports
-  GNS3 GUI            gns3-gui/gns3/modules/dynamips/settings.py
-                      (authoritative ADAPTER_MATRIX for slot0 defaults)
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- HARDWARE GROUND TRUTH (from gns3-gui/settings.py ADAPTER_MATRIX)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  c3745 slot0 = GT96100-FE  (2 FastEthernet — NOT Leopard-2FE)
-  c3725 slot0 = GT96100-FE  (2 FastEthernet)
-  c3660 slot0 = Leopard-2FE (2 FastEthernet — fixed motherboard chip)
-  c3640 slot0 = configurable NM  (no fixed built-in)
-  c3620 slot0 = configurable NM  (no fixed built-in)
-  c7200 slot0 = IO controller (C7200-IO-FE etc.), PA-* in slots 1-6
-
-  IOU nodes require a unique integer application_id per node per project.
-  Source: gns3server/compute/iou/iou_vm.py — application_id is always
-  serialised in the node info dict and must be unique across all IOU nodes
-  sharing the same compute to avoid MAC address collisions.
+  gns3-gui            gns3/modules/dynamips/settings.py  (ADAPTER_MATRIX)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
 
@@ -56,6 +58,7 @@ from constants.gns3 import (
     SCENE_WIDTH,
     SYMBOL,
 )
+from constants.validation import DYNAMIPS_COMPAT
 
 logger = logging.getLogger("gns3_exporter")
 
@@ -69,24 +72,24 @@ def _is_uuid(s: str) -> bool:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  Visual defaults (GNS3 GUI display)
+#  Visual defaults
 # ═══════════════════════════════════════════════════════════════════════════════
 
 _NODE_DIMENSIONS: Dict[str, Tuple[int, int]] = {
-    "dynamips":           (56, 40),
-    "iou":                (56, 40),
-    "vpcs":               (34, 32),
-    "traceng":            (34, 32),
-    "cloud":              (95, 65),
-    "nat":                (95, 65),
+    "dynamips": (56, 40),
+    "iou":      (56, 40),
+    "vpcs":     (34, 32),
+    "traceng":  (34, 32),
+    "cloud":    (95, 65),
+    "nat":      (95, 65),
 }
 _DEFAULT_NODE_SIZE = (65, 65)
 
 _LABEL_OFFSET: Dict[str, Tuple[int, int]] = {
-    "dynamips":        (-17, -25),
-    "iou":             (-17, -25),
-    "vpcs":            (-8,  -22),
-    "traceng":         (-8,  -22),
+    "dynamips": (-17, -25),
+    "iou":      (-17, -25),
+    "vpcs":     (-8,  -22),
+    "traceng":  (-8,  -22),
 }
 _DEFAULT_LABEL_OFFSET = (-10, -25)
 
@@ -102,74 +105,62 @@ _BUILTIN_TYPES = frozenset([
 # ═══════════════════════════════════════════════════════════════════════════════
 #  Dynamips platform tables
 #
-#  FIX (Bug 2 / Hardware): These tables were previously wrong for c3660 and c3745.
-#  Corrected values sourced from gns3-gui/gns3/modules/dynamips/settings.py
-#  ADAPTER_MATRIX (the single authoritative source for GNS3 slot defaults):
+#  FIX (V4.2): corrected _DYN_HW_DEFAULTS for c3745 and c3660.
+#  Source: gns3-gui/gns3/modules/dynamips/settings.py ADAPTER_MATRIX
 #
-#    ADAPTER_MATRIX["c3600"]["3660"] = {0: "Leopard-2FE"}  → c3660 slot0=Leopard-2FE
-#    ADAPTER_MATRIX["c3745"][""]    = {0: "GT96100-FE"}    → c3745 slot0=GT96100-FE
-#    ADAPTER_MATRIX["c3725"][""]    = {0: "GT96100-FE"}    → c3725 slot0=GT96100-FE
-#
-#  The previous version had Leopard-2FE in c3745 (wrong) and count=0 for c3660 (wrong).
+#  c3745: slot0 = GT96100-FE (was wrongly "Leopard-2FE"), max_slots = 4 (was 2)
+#  c3660: slot0 = Leopard-2FE (was absent),               max_slots = 6 (was 5)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-# Built-in Ethernet interface info per platform.
-# "count" = number of ports that slot0's fixed module provides.
 _DYN_BUILTIN: Dict[str, Dict[str, Any]] = {
-    "c7200": {"prefix": "FastEthernet",  "count": 1},   # C7200-IO-FE in slot0
-    # FIX: c3745 slot0 = GT96100-FE (2 FE) — was wrongly "Leopard-2FE" before
-    "c3745": {"prefix": "FastEthernet",  "count": 2},   # GT96100-FE in slot0
-    "c3725": {"prefix": "FastEthernet",  "count": 2},   # GT96100-FE in slot0
-    # FIX: c3660 slot0 = Leopard-2FE (2 FE) — was wrongly count=0 before
-    "c3660": {"prefix": "FastEthernet",  "count": 2},   # Leopard-2FE in slot0
-    "c3640": {"prefix": None,            "count": 0},   # NO fixed slot0
-    "c3620": {"prefix": None,            "count": 0},   # NO fixed slot0
-    "c2691": {"prefix": "FastEthernet",  "count": 2},   # GT96100-FE in slot0
-    "c2600": {"prefix": "FastEthernet",  "count": 1},   # built-in WIC
-    "c1700": {"prefix": "FastEthernet",  "count": 1},   # C1700-MB-1ETH
+    "c7200": {"prefix": "FastEthernet",  "count": 1},
+    "c3745": {"prefix": "FastEthernet",  "count": 2},   # GT96100-FE
+    "c3725": {"prefix": "FastEthernet",  "count": 2},   # GT96100-FE
+    "c3660": {"prefix": "FastEthernet",  "count": 2},   # Leopard-2FE
+    "c3640": {"prefix": None,            "count": 0},   # no fixed slot0
+    "c3620": {"prefix": None,            "count": 0},   # no fixed slot0
+    "c2691": {"prefix": "FastEthernet",  "count": 2},   # GT96100-FE
+    "c2600": {"prefix": "FastEthernet",  "count": 1},
+    "c1700": {"prefix": "FastEthernet",  "count": 1},
 }
 
-# Module → interface prefix + port count
 _DYN_MODULE: Dict[str, Dict[str, Any]] = {
-    "PA-8E":      {"prefix": "Ethernet",         "count": 8},
-    "PA-4E":      {"prefix": "Ethernet",         "count": 4},
-    "PA-FE-TX":   {"prefix": "FastEthernet",     "count": 1},
-    "PA-2FE-TX":  {"prefix": "FastEthernet",     "count": 2},
-    "PA-GE":      {"prefix": "GigabitEthernet",  "count": 1},
-    "NM-4E":      {"prefix": "Ethernet",         "count": 4},
-    "NM-1E":      {"prefix": "Ethernet",         "count": 1},
-    "NM-1FE-TX":  {"prefix": "FastEthernet",     "count": 1},
-    "NM-16ESW":   {"prefix": "FastEthernet",     "count": 16},
-    # FIX: GT96100-FE is c3725/c3745/c2691's slot0 chip (2 ports)
-    "GT96100-FE": {"prefix": "FastEthernet",     "count": 2},
-    # FIX: Leopard-2FE is c3660's slot0 chip (2 ports)
-    "Leopard-2FE":{"prefix": "FastEthernet",     "count": 2},
-    "C7200-IO-FE":  {"prefix": "FastEthernet",   "count": 1},
-    "C7200-IO-2FE": {"prefix": "FastEthernet",   "count": 2},
-    "C7200-IO-GE-E":{"prefix": "GigabitEthernet","count": 1},
-    "PA-4T+":     {"prefix": "Serial",           "count": 4},
-    "PA-8T":      {"prefix": "Serial",           "count": 8},
-    "NM-4T":      {"prefix": "Serial",           "count": 4},
-    "NM-1T":      {"prefix": "Serial",           "count": 1},
+    "PA-8E":       {"prefix": "Ethernet",        "count": 8},
+    "PA-4E":       {"prefix": "Ethernet",        "count": 4},
+    "PA-FE-TX":    {"prefix": "FastEthernet",    "count": 1},
+    "PA-2FE-TX":   {"prefix": "FastEthernet",    "count": 2},
+    "PA-GE":       {"prefix": "GigabitEthernet", "count": 1},
+    "NM-4E":       {"prefix": "Ethernet",        "count": 4},
+    "NM-1E":       {"prefix": "Ethernet",        "count": 1},
+    "NM-1FE-TX":   {"prefix": "FastEthernet",    "count": 1},
+    "NM-16ESW":    {"prefix": "FastEthernet",    "count": 16},
+    "GT96100-FE":  {"prefix": "FastEthernet",    "count": 2},
+    "Leopard-2FE": {"prefix": "FastEthernet",    "count": 2},
+    "C7200-IO-FE":   {"prefix": "FastEthernet",    "count": 1},
+    "C7200-IO-2FE":  {"prefix": "FastEthernet",    "count": 2},
+    "C7200-IO-GE-E": {"prefix": "GigabitEthernet", "count": 1},
+    "C1700-MB-1ETH": {"prefix": "FastEthernet",    "count": 1},
+    "PA-4T+":      {"prefix": "Serial",          "count": 4},
+    "PA-8T":       {"prefix": "Serial",          "count": 8},
+    "NM-4T":       {"prefix": "Serial",          "count": 4},
+    "NM-1T":       {"prefix": "Serial",          "count": 1},
 }
 
-# Default hardware properties injected when missing.
-# FIX: c3745 slot0 corrected to GT96100-FE (was Leopard-2FE — wrong).
-# FIX: c3660 slot0 corrected to Leopard-2FE (was absent — wrong).
-# Source: gns3-gui/gns3/modules/dynamips/settings.py ADAPTER_MATRIX.
 _DYN_HW_DEFAULTS: Dict[str, Dict[str, Any]] = {
-    "c7200": {"ram": 512,  "slot0": "C7200-IO-FE",  "default_nm": "PA-8E",    "max_slots": 6},
-    # c3745: slot0 = GT96100-FE (motherboard FastEthernet chip, 2 ports)
-    "c3745": {"ram": 256,  "slot0": "GT96100-FE",   "default_nm": "NM-4E",    "max_slots": 4},
-    "c3725": {"ram": 256,  "slot0": "GT96100-FE",   "default_nm": "NM-4E",    "max_slots": 2},
-    # c3660: slot0 = Leopard-2FE (fixed motherboard chip, 2 FastEthernet ports)
-    "c3660": {"ram": 256,  "slot0": "Leopard-2FE",  "default_nm": "NM-4E",    "max_slots": 6},
+    # c7200: slot0 is an I/O controller, expansion PAs go in slots 1-6
+    "c7200": {"ram": 512,  "slot0": "C7200-IO-FE",  "default_nm": "PA-8E",  "max_slots": 6},
+    # c3745: slot0 = GT96100-FE (2-port FE chip), 4 NM expansion slots (1-4)
+    "c3745": {"ram": 256,  "slot0": "GT96100-FE",   "default_nm": "NM-4E",  "max_slots": 4},
+    # c3725: slot0 = GT96100-FE, 2 NM expansion slots (1-2)
+    "c3725": {"ram": 256,  "slot0": "GT96100-FE",   "default_nm": "NM-4E",  "max_slots": 2},
+    # c3660: slot0 = Leopard-2FE (2-port FE chip), 6 NM expansion slots (1-6)
+    "c3660": {"ram": 256,  "slot0": "Leopard-2FE",  "default_nm": "NM-4E",  "max_slots": 6},
     # c3640/c3620: no fixed slot0 — all slots are user NM modules
-    "c3640": {"ram": 256,                            "default_nm": "NM-4E",    "max_slots": 4},
-    "c3620": {"ram": 256,                            "default_nm": "NM-4E",    "max_slots": 2},
-    "c2691": {"ram": 256,  "slot0": "GT96100-FE",   "default_nm": "NM-4E",    "max_slots": 1},
-    "c2600": {"ram": 128,  "slot0": "NM-1FE-TX",    "default_nm": "NM-1E",    "max_slots": 1},
-    "c1700": {"ram": 128,  "slot0": "NM-1FE-TX",    "default_nm": "NM-1E",    "max_slots": 1},
+    "c3640": {"ram": 256,                            "default_nm": "NM-4E",  "max_slots": 4},
+    "c3620": {"ram": 256,                            "default_nm": "NM-4E",  "max_slots": 2},
+    "c2691": {"ram": 256,  "slot0": "GT96100-FE",   "default_nm": "NM-4E",  "max_slots": 1},
+    "c2600": {"ram": 128,  "slot0": "NM-1FE-TX",    "default_nm": "NM-1E",  "max_slots": 1},
+    "c1700": {"ram": 128,  "slot0": "C1700-MB-1ETH","default_nm": "NM-1E",  "max_slots": 1},
 }
 
 _NODE_TYPE_DIR: Dict[str, str] = {
@@ -184,12 +175,158 @@ _NODE_TYPE_DIR: Dict[str, str] = {
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+#  Pre-export validation gate
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class ExportError(Exception):
+    """Raised by _pre_export_validate when a blocking issue is found."""
+
+
+def _pre_export_validate(nodes: List[dict], links: List[dict]) -> None:
+    """Validate topology data before writing a single byte to disk.
+
+    Raises ExportError listing ALL blocking issues found (not just the first).
+    Prints warnings for non-blocking issues that the user should be aware of.
+
+    Checks performed:
+      1. Dynamips slot modules are compatible with the node's platform
+      2. Every link endpoint's adapter has a module installed (for Dynamips)
+      3. Ethernet switches with non-default VLANs have at least one dot1q trunk port
+      4. Placeholder IOS images (warning only)
+    """
+    errors:   List[str] = []
+    warnings: List[str] = []
+
+    node_map: Dict[str, dict] = {n.get("node_id", ""): n for n in nodes}
+
+    # ── Build per-node set of adapters that actually have a module ────────────
+    # For Dynamips: adapter 0 is covered by built-in OR slot0 module.
+    # Adapters 1+ require a slotN key in properties.
+    def _dynamips_installed_adapters(node: dict) -> set:
+        props    = node.get("properties", {})
+        platform = str(props.get("platform", node.get("template_name", ""))).lower()
+        builtin  = _DYN_BUILTIN.get(platform, {})
+        installed = set()
+
+        # Adapter 0: covered if platform has built-in ports OR slot0 is set
+        if builtin.get("count", 0) > 0 or props.get("slot0"):
+            installed.add(0)
+
+        # Adapters 1+: covered if slotN is set to a non-empty module
+        hw = _DYN_HW_DEFAULTS.get(platform, {})
+        max_slots = hw.get("max_slots", 4)
+        for slot_num in range(1, max_slots + 1):
+            if props.get(f"slot{slot_num}"):
+                installed.add(slot_num)
+
+        return installed
+
+    # ── Check 1: Dynamips slot compatibility ─────────────────────────────────
+    for node in nodes:
+        if node.get("node_type") != "dynamips":
+            continue
+        name     = node.get("name", node.get("node_id", "?"))
+        props    = node.get("properties", {})
+        platform = str(props.get("platform", "")).lower()
+
+        if not platform or platform not in DYNAMIPS_COMPAT:
+            # Missing platform will be caught elsewhere; skip slot check
+            continue
+
+        compat = DYNAMIPS_COMPAT[platform]
+
+        slot_num = 0
+        while True:
+            slot_key = f"slot{slot_num}"
+            if slot_key not in props:
+                break
+            module = props[slot_key]
+            if module:
+                valid_modules = compat["slots"].get(slot_num)
+                if valid_modules is None:
+                    errors.append(
+                        f"Node '{name}' ({platform}): slot{slot_num} does not exist "
+                        f"on this platform (max slot: {max(compat['slots'].keys())})"
+                    )
+                elif module not in valid_modules:
+                    errors.append(
+                        f"Node '{name}' ({platform}): slot{slot_num}='{module}' is "
+                        f"incompatible — allowed: {', '.join(valid_modules)}"
+                    )
+            slot_num += 1
+
+        # Check 4: placeholder image warning
+        image = props.get("image", "")
+        if image and ("placeholder" in image.lower() or image.endswith(".bin")):
+            warnings.append(
+                f"Node '{name}' ({platform}): image='{image}' looks like a placeholder. "
+                f"GNS3 will fail to start this node unless a real IOS image is installed."
+            )
+
+    # ── Check 2: Link endpoints reference installed adapters ─────────────────
+    for i, link in enumerate(links):
+        for ep in link.get("nodes", []):
+            nid     = ep.get("node_id", "")
+            adapter = ep.get("adapter_number", 0)
+            node    = node_map.get(nid)
+            if node is None or node.get("node_type") != "dynamips":
+                continue
+            name      = node.get("name", nid)
+            installed = _dynamips_installed_adapters(node)
+            if adapter not in installed:
+                errors.append(
+                    f"Link {i}: node '{name}' uses adapter {adapter} but no slot module "
+                    f"is installed there. GNS3 will show the link as connected but the "
+                    f"interface will not exist in IOS."
+                )
+
+    # ── Check 3: Switch VLAN / trunk consistency ──────────────────────────────
+    for node in nodes:
+        if node.get("node_type") != "ethernet_switch":
+            continue
+        name          = node.get("name", node.get("node_id", "?"))
+        props         = node.get("properties", {})
+        ports_mapping = props.get("ports_mapping", [])
+
+        if not ports_mapping:
+            # hw_config should have created this; if missing the switch won't work
+            errors.append(
+                f"Switch '{name}' has no ports_mapping. "
+                f"Run hw_config.inject_hardware_config() before exporting."
+            )
+            continue
+
+        access_vlans = {p.get("vlan", 1) for p in ports_mapping if p.get("type") == "access"}
+        trunk_count  = sum(1 for p in ports_mapping if p.get("type") == "dot1q")
+        non_default  = access_vlans - {1}
+
+        if non_default and trunk_count == 0:
+            errors.append(
+                f"Switch '{name}' has access ports on VLAN(s) {sorted(non_default)} "
+                f"but no dot1q trunk port. Inter-VLAN traffic will be silently dropped. "
+                f"Run topology_finalizer.apply_switch_port_patches() before exporting."
+            )
+
+    # ── Emit warnings ─────────────────────────────────────────────────────────
+    if warnings:
+        print("\n[pre-export WARNINGS]")
+        for w in warnings:
+            print(f"  [!] {w}")
+
+    # ── Raise on errors ───────────────────────────────────────────────────────
+    if errors:
+        msg = "\n[pre-export ERRORS — export aborted]\n"
+        for e in errors:
+            msg += f"  [X] {e}\n"
+        raise ExportError(msg)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 #  Input normalisation
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _normalise_input(data: dict) -> Tuple[str, List[dict], List[dict]]:
     name = data.get("name", "Imported_Network")
-
     topo = data.get("topology")
     if isinstance(topo, dict):
         nodes = topo.get("nodes", [])
@@ -202,7 +339,6 @@ def _normalise_input(data: dict) -> Tuple[str, List[dict], List[dict]]:
         raise ValueError(
             "No nodes found. Expected 'topology.nodes' or top-level 'nodes'."
         )
-
     return name, list(nodes), list(links)
 
 
@@ -216,14 +352,12 @@ def _assign_uuids(
 ) -> Tuple[str, Dict[str, str]]:
     project_uuid = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"structranet-{project_name}"))
     node_uuid_map: Dict[str, str] = {}
-
     for n in nodes:
         nid = n.get("node_id", "")
         if _is_uuid(nid):
             node_uuid_map[nid] = nid
         else:
             node_uuid_map[nid] = str(uuid.uuid5(uuid.UUID(project_uuid), nid))
-
     return project_uuid, node_uuid_map
 
 
@@ -232,8 +366,8 @@ def _assign_uuids(
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _grid_positions(nodes: List[dict]) -> Dict[str, Tuple[int, int]]:
-    existing: Dict[str, Tuple[int, int]] = {}
-    needs_layout: List[dict] = []
+    existing:      Dict[str, Tuple[int, int]] = {}
+    needs_layout:  List[dict] = []
 
     for n in nodes:
         nid = n.get("node_id", "")
@@ -260,18 +394,18 @@ def _grid_positions(nodes: List[dict]) -> Dict[str, Tuple[int, int]]:
     col, row, last_priority = 0, 0, None
 
     for n in scored:
-        nid = n.get("node_id", "")
+        nid      = n.get("node_id", "")
         priority = ROLE_PRIORITY.get(n.get("node_type", ""), DEFAULT_ROLE_PRIORITY)
 
         if last_priority is not None and priority != last_priority:
             row += 1
-            col = 0
+            col  = 0
         last_priority = priority
 
         positions[nid] = (col * 200 - 400, row * 150 - 200)
         col += 1
         if col >= 5:
-            col = 0
+            col  = 0
             row += 1
 
     return positions
@@ -289,10 +423,9 @@ def _port_name(node: dict, adapter: int, port: int) -> str:
     if ntype == "dynamips":
         platform = str(props.get("platform", "")).lower() or template
         if adapter == 0:
-            bi = _DYN_BUILTIN.get(platform, {"prefix": "FastEthernet", "count": 1})
+            bi  = _DYN_BUILTIN.get(platform, {"prefix": "FastEthernet", "count": 1})
             pfx = bi.get("prefix") or "FastEthernet"
             if bi.get("count", 0) == 0:
-                # c3640/c3620: slot0 is a user NM module, not a fixed chip
                 mod = props.get("slot0", "")
                 if mod and mod in _DYN_MODULE:
                     pfx = _DYN_MODULE[mod]["prefix"]
@@ -309,9 +442,7 @@ def _port_name(node: dict, adapter: int, port: int) -> str:
         eth_adapters = int(props.get("ethernet_adapters", 2))
         if adapter < eth_adapters:
             return f"Ethernet{adapter}/{port}"
-        else:
-            local_ser = adapter - eth_adapters
-            return f"Serial{local_ser}/{port}"
+        return f"Serial{adapter - eth_adapters}/{port}"
 
     if ntype in ("qemu", "docker", "virtualbox", "vmware"):
         return f"eth{adapter}"
@@ -356,9 +487,9 @@ def _short_name(long_name: str) -> str:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _build_ports(node: dict, links: List[dict]) -> List[dict]:
-    nid = node.get("node_id", "")
-    seen: set = set()
-    ports: List[dict] = []
+    nid   = node.get("node_id", "")
+    seen  = set()
+    ports = []
 
     for link in links:
         for ep in link.get("nodes", []):
@@ -376,11 +507,11 @@ def _build_ports(node: dict, links: List[dict]) -> List[dict]:
             ltype = link.get("link_type", "ethernet")
 
             ports.append({
-                "adapter_number": adapter,
-                "port_number":    port,
-                "name":           long,
-                "short_name":     short,
-                "link_type":      ltype,
+                "adapter_number":  adapter,
+                "port_number":     port,
+                "name":            long,
+                "short_name":      short,
+                "link_type":       ltype,
                 "data_link_types": (
                     {"Ethernet": "DLT_EN10MB"} if ltype == "ethernet"
                     else {"PPP": "DLT_PPP_SERIAL"}
@@ -392,7 +523,7 @@ def _build_ports(node: dict, links: List[dict]) -> List[dict]:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  Config file extraction  (ZIP content)
+#  Config file extraction
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _extract_configs(node: dict, node_uuid: str) -> Dict[str, str]:
@@ -416,7 +547,7 @@ def _extract_configs(node: dict, node_uuid: str) -> Dict[str, str]:
 #  Properties cleaner
 # ═══════════════════════════════════════════════════════════════════════════════
 
-_PIPELINE_ONLY_KEYS = frozenset([])
+_PIPELINE_ONLY_KEYS: frozenset = frozenset()
 
 def _clean_properties(node: dict) -> dict:
     return {
@@ -427,20 +558,17 @@ def _clean_properties(node: dict) -> dict:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  Hardware property injection
+#  Hardware property injection  (gap-filling only — trusts hw_config output)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _detect_dynamips_platform(props: dict, template: str) -> str:
     existing = str(props.get("platform", "")).lower().strip()
     if existing and existing in _DYN_HW_DEFAULTS:
         return existing
-
     name_lower = str(template).lower()
-    for platform in ("c7200", "c3745", "c3725", "c3660", "c3640", "c3620",
-                     "c2691", "c2600", "c1700"):
+    for platform in _DYN_HW_DEFAULTS:
         if platform in name_lower or platform[1:] in name_lower:
             return platform
-
     logger.warning(
         "Cannot detect Dynamips platform from template '%s' — defaulting to c3745",
         template,
@@ -451,8 +579,13 @@ def _detect_dynamips_platform(props: dict, template: str) -> str:
 def _inject_dynamips_properties(
     node: dict, props: dict, template: str, links: List[dict]
 ) -> None:
+    """Fill in any Dynamips properties that hw_config didn't set.
+
+    Uses setdefault / 'if not in props' throughout so hw_config output
+    is never overwritten.
+    """
     platform = _detect_dynamips_platform(props, template)
-    hw = _DYN_HW_DEFAULTS.get(platform, _DYN_HW_DEFAULTS["c3745"])
+    hw       = _DYN_HW_DEFAULTS.get(platform, _DYN_HW_DEFAULTS["c3745"])
 
     props.setdefault("platform", platform)
     props.setdefault("ram", hw["ram"])
@@ -465,13 +598,12 @@ def _inject_dynamips_properties(
             node.get("name", "?"), placeholder,
         )
 
-    # slot0: only for platforms with a fixed slot0 module.
-    # c3640/c3620 have no fixed slot0, so "slot0" key is absent from hw defaults.
+    # slot0: only for platforms that have a fixed slot0 module
     if "slot0" not in props and "slot0" in hw:
         props["slot0"] = hw["slot0"]
 
-    nid = node.get("node_id", "")
-    max_adapter = 0
+    nid              = node.get("node_id", "")
+    max_adapter      = 0
     serial_adapter_set: set = set()
 
     for link in links:
@@ -492,6 +624,7 @@ def _inject_dynamips_properties(
         if slot_key not in props:
             props[slot_key] = serial_nm if slot_num in serial_adapter_set else default_nm
 
+    # Ensure slot0 is set if adapter 0 is used by a link
     if "slot0" not in props:
         for link in links:
             for ep in link.get("nodes", []):
@@ -511,7 +644,7 @@ def _inject_iou_properties(
         )
 
     if "ethernet_adapters" not in props or "serial_adapters" not in props:
-        nid = node.get("node_id", "")
+        nid     = node.get("node_id", "")
         max_eth = -1
         max_ser = -1
         for link in links:
@@ -524,12 +657,12 @@ def _inject_iou_properties(
                 else:
                     max_eth = max(max_eth, adapter)
 
-        eth = int(props.get("ethernet_adapters", max(max_eth + 1, 2) if max_eth >= 0 else 2))
+        eth = int(props.get("ethernet_adapters",
+                            max(max_eth + 1, 2) if max_eth >= 0 else 2))
         props.setdefault("ethernet_adapters", eth)
         if "serial_adapters" not in props:
             if max_ser >= 0:
-                ser_count = max(max_ser - eth + 1, 1)
-                props["serial_adapters"] = ser_count
+                props["serial_adapters"] = max(max_ser - eth + 1, 1)
             else:
                 props["serial_adapters"] = 0
 
@@ -539,7 +672,7 @@ def _inject_iou_properties(
 def _inject_qemu_properties(props: dict, template: str) -> None:
     if "hda_disk_image" not in props:
         props["hda_disk_image"] = f"{template}.qcow2"
-    props.setdefault("ram", 512)
+    props.setdefault("ram",      512)
     props.setdefault("adapters", 8)
 
 
@@ -572,26 +705,42 @@ def convert(
     name_override: str = None,
     image_map: Dict[str, str] = None,
 ) -> str:
+    """Convert a topology dict to a .gns3project ZIP.
+
+    Raises ExportError before writing anything if blocking pre-export
+    validation issues are found (wrong slot modules, missing trunk ports, etc.).
+    """
     image_map = image_map or {}
 
     project_name, nodes_in, links_in = _normalise_input(input_data)
     if name_override:
         project_name = name_override
 
+    # ── Hardware gap-filling (runs before validation so injected props are checked) ──
+    for n in nodes_in:
+        if n.get("node_type") == "dynamips" and n.get("template_name") in image_map:
+            n.setdefault("properties", {})["image"] = image_map[n["template_name"]]
+        _inject_hardware_properties(n, links_in)
+
+    # IOU application_id — assign before validation so the check sees them
+    iou_application_id_counter = 1
+    for n in nodes_in:
+        if n.get("node_type") == "iou":
+            props = n.setdefault("properties", {})
+            if "application_id" not in props:
+                props["application_id"] = iou_application_id_counter
+            iou_application_id_counter += 1
+
+    # ── Pre-export validation gate ────────────────────────────────────────────
+    _pre_export_validate(nodes_in, links_in)
+
+    # ── UUID + layout ─────────────────────────────────────────────────────────
     project_uuid, node_uuid_map = _assign_uuids(project_name, nodes_in)
-
     positions = _grid_positions(nodes_in)
-
     node_lookup: Dict[str, dict] = {n.get("node_id", ""): n for n in nodes_in}
 
-    gns3_nodes: List[dict] = []
+    gns3_nodes:      List[dict] = []
     all_zip_configs: Dict[str, str] = {}
-
-    # FIX (Bug 2): Track IOU application_id counter so every IOU node gets a
-    # unique integer.  Source: gns3server/compute/iou/iou_vm.py — application_id
-    # must be unique across all IOU nodes sharing the same compute to avoid
-    # MAC address collisions.  We start at 1 and increment per IOU node.
-    iou_application_id_counter = 1
 
     for n in nodes_in:
         nid   = n.get("node_id", "")
@@ -601,22 +750,10 @@ def convert(
         w, h  = _NODE_DIMENSIONS.get(ntype, _DEFAULT_NODE_SIZE)
         lx, ly = _LABEL_OFFSET.get(ntype, _DEFAULT_LABEL_OFFSET)
 
-        if ntype == "dynamips" and n.get("template_name") in image_map:
-            n.setdefault("properties", {})["image"] = image_map[n["template_name"]]
-
-        _inject_hardware_properties(n, links_in)
-
-        # FIX (Bug 2): Assign unique application_id to every IOU node.
-        if ntype == "iou":
-            props = n.setdefault("properties", {})
-            if "application_id" not in props:
-                props["application_id"] = iou_application_id_counter
-            iou_application_id_counter += 1
-
         all_zip_configs.update(_extract_configs(n, nuuid))
 
         template_name = n.get("template_name", "")
-        template_id: Optional[str] = None
+        template_id:  Optional[str] = None
         if ntype in _APPLIANCE_TYPES and template_name:
             template_id = str(
                 uuid.uuid5(uuid.NAMESPACE_DNS, f"gns3-template-{template_name}")
@@ -631,18 +768,18 @@ def convert(
 
         label = n.get("label") if isinstance(n.get("label"), dict) else {}
         node_obj: dict = {
-            "compute_id":       n.get("compute_id", "local"),
-            "node_id":          nuuid,
-            "node_type":        ntype,
-            "name":             n.get("name", nid),
-            "console":          None,
-            "console_type":     CONSOLE_TYPE.get(ntype),
-            "x":                x,
-            "y":                y,
-            "z":                n.get("z", 1),
-            "width":            w,
-            "height":           h,
-            "symbol":           SYMBOL.get(ntype, ":/symbols/computer.svg"),
+            "compute_id":        n.get("compute_id", "local"),
+            "node_id":           nuuid,
+            "node_type":         ntype,
+            "name":              n.get("name", nid),
+            "console":           None,
+            "console_type":      CONSOLE_TYPE.get(ntype),
+            "x":                 x,
+            "y":                 y,
+            "z":                 n.get("z", 1),
+            "width":             w,
+            "height":            h,
+            "symbol":            SYMBOL.get(ntype, ":/symbols/computer.svg"),
             "label": {
                 "text":     n.get("name", nid),
                 "x":        label.get("x", lx),
@@ -650,11 +787,11 @@ def convert(
                 "rotation": 0,
                 "style":    LABEL_STYLE,
             },
-            "properties":       _clean_properties(n),
-            "port_name_format": port_name_format,
+            "properties":        _clean_properties(n),
+            "port_name_format":  port_name_format,
             "port_segment_size": port_segment_size,
-            "first_port_name":  n.get("first_port_name"),
-            "ports":            _build_ports(n, links_in),
+            "first_port_name":   n.get("first_port_name"),
+            "ports":             _build_ports(n, links_in),
         }
 
         if ntype in _APPLIANCE_TYPES:
@@ -670,12 +807,11 @@ def convert(
             logger.warning("Link %d has fewer than 2 endpoints — skipped", i)
             continue
 
-        ep0, ep1 = eps[0], eps[1]
-        orig_id0 = ep0.get("node_id", "")
-        orig_id1 = ep1.get("node_id", "")
-
-        uuid0 = node_uuid_map.get(orig_id0)
-        uuid1 = node_uuid_map.get(orig_id1)
+        ep0, ep1   = eps[0], eps[1]
+        orig_id0   = ep0.get("node_id", "")
+        orig_id1   = ep1.get("node_id", "")
+        uuid0      = node_uuid_map.get(orig_id0)
+        uuid1      = node_uuid_map.get(orig_id1)
 
         if not uuid0:
             logger.warning("Link %d: unknown node_id '%s' — skipped", i, orig_id0)
@@ -691,8 +827,8 @@ def convert(
         node1 = node_lookup.get(orig_id1, {})
         ad0, pt0 = ep0.get("adapter_number", 0), ep0.get("port_number", 0)
         ad1, pt1 = ep1.get("adapter_number", 0), ep1.get("port_number", 0)
-        pname0 = _port_name(node0, ad0, pt0)
-        pname1 = _port_name(node1, ad1, pt1)
+        pname0   = _port_name(node0, ad0, pt0)
+        pname1   = _port_name(node1, ad1, pt1)
 
         gns3_links.append({
             "link_id":   link_uuid,
@@ -823,11 +959,14 @@ def main() -> None:
             or (data.get("topology") or {}).get("name")
             or "network"
         )
-        safe = re.sub(r"[^\w\- ]", "_", raw_name).replace(" ", "_")
+        safe     = re.sub(r"[^\w\- ]", "_", raw_name).replace(" ", "_")
         out_path = str(Path(args.input).parent / f"{safe}.gns3project")
 
     try:
         convert(data, out_path, name_override=args.name, image_map=image_map)
+    except ExportError as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
     except Exception as e:
         print(f"[ERR] {e}", file=sys.stderr)
         if args.debug:

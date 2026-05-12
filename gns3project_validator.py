@@ -18,6 +18,9 @@ Validation checks:
  10. Link integrity (no duplicate links, no self-links, both endpoints valid)
  11. UUID format validation (all node_id, link_id, project_id are valid UUIDs)
 
+All node-type taxonomy and Dynamips hardware constants live in
+constants/validation.py — import from there instead of duplicating here.
+
 Usage:
     python gns3project_validator.py <file.gns3project>
     python gns3project_validator.py <file.gns3project> --verbose
@@ -32,125 +35,19 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+from constants.validation import (
+    APPLIANCE_NODE_TYPES,
+    BUILTIN_NODE_TYPES,
+    DYNAMIPS_COMPAT,
+    MODULE_PORT_COUNT,
+    VALID_NODE_TYPES,
+)
+
 # ── Severity levels ──────────────────────────────────────────────────────────────
 CRITICAL = "CRITICAL"   # Will cause GNS3 import failure
 ERROR    = "ERROR"      # Will cause node/link to fail at runtime
 WARNING  = "WARNING"    # May work but behavior will be wrong
 INFO     = "INFO"       # Informational, not a problem
-
-# ── Known valid GNS3 node types ─────────────────────────────────────────────────
-VALID_NODE_TYPES = {
-    "dynamips", "iou", "qemu", "docker", "vpcs", "traceng",
-    "ethernet_switch", "ethernet_hub", "cloud", "nat",
-    "virtualbox", "vmware", "frame_relay_switch", "atm_switch",
-}
-
-# ── Types that are "built-in" and do NOT need template_id ───────────────────────
-BUILTIN_NODE_TYPES = {"vpcs", "ethernet_switch", "ethernet_hub", "cloud", "nat", "traceng"}
-
-# ── Types that NEED template_id (or null) to resolve appliance ──────────────────
-APPLIANCE_NODE_TYPES = {"dynamips", "iou", "qemu", "docker", "virtualbox", "vmware"}
-
-# ── Dynamips platform ↔ slot compatibility matrix ───────────────────────────────
-# Each platform supports specific modules in specific slots
-DYNAMIPS_COMPAT = {
-    "c7200": {
-        "builtin_ifaces": 0,        # c7200 has no built-in, uses slot0 for I/O controller
-        "slots": {
-            0: ["C7200-IO-FE", "C7200-IO-2FE", "C7200-IO-GE-E"], # I/O Controllers ONLY
-            1: ["PA-FE-TX", "PA-2FE-TX", "PA-4E", "PA-8E", "PA-GE", "PA-4T+", "PA-8T", "PA-A1", "PA-POS-OC3"],
-            2: ["PA-FE-TX", "PA-2FE-TX", "PA-4E", "PA-8E", "PA-GE", "PA-4T+", "PA-8T", "PA-A1", "PA-POS-OC3"],
-            3: ["PA-FE-TX", "PA-2FE-TX", "PA-4E", "PA-8E", "PA-GE", "PA-4T+", "PA-8T", "PA-A1", "PA-POS-OC3"],
-            4: ["PA-FE-TX", "PA-2FE-TX", "PA-4E", "PA-8E", "PA-GE", "PA-4T+", "PA-8T", "PA-A1", "PA-POS-OC3"],
-            5: ["PA-FE-TX", "PA-2FE-TX", "PA-4E", "PA-8E", "PA-GE", "PA-4T+", "PA-8T", "PA-A1", "PA-POS-OC3"],
-            6: ["PA-FE-TX", "PA-2FE-TX", "PA-4E", "PA-8E", "PA-GE", "PA-4T+", "PA-8T", "PA-A1", "PA-POS-OC3"],
-        },
-        "valid_images": [r"c7200.*\.image", r"c7200.*\.bin"],
-        "ram_range": (256, 1024),
-    },
-    "c3745": {
-        "builtin_ifaces": 2,        # FastEthernet0/0 and FastEthernet0/1 (GT96100-FE)
-        "slots": {
-            0: ["GT96100-FE"],       # Fixed, not removable
-            1: ["NM-1FE-TX", "NM-1E", "NM-4E", "NM-16ESW", "NM-4T", "NM-1T"],
-            2: ["NM-1FE-TX", "NM-1E", "NM-4E", "NM-16ESW", "NM-4T", "NM-1T"],
-            3: ["NM-1FE-TX", "NM-1E", "NM-4E", "NM-16ESW", "NM-4T", "NM-1T"],
-            4: ["NM-1FE-TX", "NM-1E", "NM-4E", "NM-16ESW", "NM-4T", "NM-1T"],
-        },
-        "valid_images": [r"c3745.*\.bin"],
-        "ram_range": (128, 512),
-    },
-    "c3725": {
-        "builtin_ifaces": 2,        # FastEthernet0/0 and FastEthernet0/1 (GT96100-FE)
-        "slots": {
-            0: ["GT96100-FE"],
-            1: ["NM-1FE-TX", "NM-1E", "NM-4E", "NM-16ESW", "NM-4T", "NM-1T"],
-            2: ["NM-1FE-TX", "NM-1E", "NM-4E", "NM-16ESW", "NM-4T", "NM-1T"],
-        },
-        "valid_images": [r"c3725.*\.bin"],
-        "ram_range": (128, 512),
-    },
-    "c3660": {
-        "builtin_ifaces": 0,        # No builtin — all come from NM slots
-        "slots": {
-            0: ["NM-1FE-TX", "NM-1E", "NM-4E", "NM-16ESW", "NM-4T", "NM-1T"],
-            1: ["NM-1FE-TX", "NM-1E", "NM-4E", "NM-16ESW", "NM-4T", "NM-1T"],
-            2: ["NM-1FE-TX", "NM-1E", "NM-4E", "NM-16ESW", "NM-4T", "NM-1T"],
-            3: ["NM-1FE-TX", "NM-1E", "NM-4E", "NM-16ESW", "NM-4T", "NM-1T"],
-            4: ["NM-1FE-TX", "NM-1E", "NM-4E", "NM-16ESW", "NM-4T", "NM-1T"],
-            5: ["NM-1FE-TX", "NM-1E", "NM-4E", "NM-16ESW", "NM-4T", "NM-1T"],
-        },
-        "valid_images": [r"c3660.*\.bin"],
-        "ram_range": (128, 512),
-    },
-    "c3640": {
-        "builtin_ifaces": 0,
-        "slots": {
-            0: ["NM-1FE-TX", "NM-1E", "NM-4E", "NM-16ESW", "NM-4T", "NM-1T"],
-            1: ["NM-1FE-TX", "NM-1E", "NM-4E", "NM-16ESW", "NM-4T", "NM-1T"],
-            2: ["NM-1FE-TX", "NM-1E", "NM-4E", "NM-16ESW", "NM-4T", "NM-1T"],
-            3: ["NM-1FE-TX", "NM-1E", "NM-4E", "NM-16ESW", "NM-4T", "NM-1T"],
-        },
-        "valid_images": [r"c3640.*\.bin"],
-        "ram_range": (128, 512),
-    },
-    "c2691": {
-        "builtin_ifaces": 2,        # FastEthernet0/0 and FastEthernet0/1 (GT96100-FE)
-        "slots": {
-            0: ["GT96100-FE"],
-            1: ["NM-1FE-TX", "NM-1E", "NM-4E", "NM-16ESW", "NM-4T", "NM-1T"],
-            2: ["NM-1FE-TX", "NM-1E", "NM-4E", "NM-16ESW", "NM-4T", "NM-1T"],
-        },
-        "valid_images": [r"c2691.*\.bin"],
-        "ram_range": (128, 512),
-    },
-    "c2600": {
-        "builtin_ifaces": 1,        # FastEthernet0/0
-        "slots": {
-            0: ["NM-1FE-TX", "NM-1E", "NM-4E", "NM-16ESW", "NM-4T", "NM-1T"],
-            1: ["NM-1FE-TX", "NM-1E", "NM-4E", "NM-16ESW", "NM-4T", "NM-1T"],
-        },
-        "valid_images": [r"c2600.*\.bin"],
-        "ram_range": (64, 256),
-    },
-    "c1700": {
-        "builtin_ifaces": 1,        # FastEthernet0/0
-        "slots": {
-            0: ["NM-1FE-TX", "NM-1E", "NM-4E", "NM-16ESW", "NM-4T", "NM-1T"],
-        },
-        "valid_images": [r"c1700.*\.bin"],
-        "ram_range": (64, 256),
-    },
-}
-
-# ── Dynamips module → port count ────────────────────────────────────────────────
-MODULE_PORT_COUNT = {
-    "PA-FE-TX": 2, "PA-2FE-TX": 2, "PA-4E": 4, "PA-8E": 8, "PA-GE": 1,
-    "PA-4T+": 4, "PA-8T": 8, "PA-A1": 1, "PA-POS-OC3": 1,
-    "GT96100-FE": 2,
-    "NM-1FE-TX": 1, "NM-1E": 1, "NM-4E": 4, "NM-16ESW": 16,
-    "NM-4T": 4, "NM-1T": 1,
-}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -190,7 +87,6 @@ class GNS3ProjectValidator:
 
         # ── Check 1: ZIP structure ──────────────────────────────────────────────
         if not self._check_zip_structure():
-            # Can't continue without valid ZIP
             self._print_results()
             return False
 
@@ -199,10 +95,9 @@ class GNS3ProjectValidator:
             self._print_results()
             return False
 
-        # All subsequent checks need the parsed JSON
-        topo = self.project_json.get("topology", {})
-        nodes = topo.get("nodes", [])
-        links = topo.get("links", [])
+        topo     = self.project_json.get("topology", {})
+        nodes    = topo.get("nodes", [])
+        links    = topo.get("links", [])
         computes = topo.get("computes", [])
 
         # ── Check 3: Node validation ────────────────────────────────────────────
@@ -232,9 +127,7 @@ class GNS3ProjectValidator:
         # ── Check 11: UUID format validation ────────────────────────────────────
         self._check_uuids(nodes, links)
 
-        # ── Print results ───────────────────────────────────────────────────────
         self._print_results()
-
         return self.stats["critical"] == 0 and self.stats["error"] == 0
 
     # ── Check 1: ZIP structure ──────────────────────────────────────────────────
@@ -249,27 +142,21 @@ class GNS3ProjectValidator:
             with zipfile.ZipFile(self.filepath, "r") as zf:
                 self.zip_files = set(zf.namelist())
 
-                # Must contain project.gns3
                 if "project.gns3" not in self.zip_files:
                     self._add_issue(CRITICAL, "ZIP",
                                     "Missing project.gns3 — not a valid .gns3project file")
                     return False
 
-                # Read the main JSON
                 self.project_json = json.loads(zf.read("project.gns3"))
 
-                # Check file paths conform to expected patterns
                 for f in self.zip_files:
                     if f == "project.gns3":
                         continue
-                    # Expected: project-files/<node_type>/<uuid>/...  (standard GNS3 path)
-                    # Also accept: files/<uuid>/...  (legacy path from older exporters)
                     if not f.startswith("project-files/") and not f.startswith("files/"):
                         self._add_issue(WARNING, "ZIP",
                                         f"Unexpected file in ZIP: {f}",
                                         "Non-standard files may be ignored by GNS3")
 
-                # Count config files
                 config_files = [f for f in self.zip_files
                                 if "/configs/" in f or f.endswith(".vpc")]
                 if config_files:
@@ -298,31 +185,26 @@ class GNS3ProjectValidator:
 
         pj = self.project_json
 
-        # Required top-level keys
         required_keys = ["name", "project_id", "revision", "type", "version", "topology"]
         for key in required_keys:
             if key not in pj:
                 self._add_issue(CRITICAL, "Schema", f"Missing required key: {key}")
 
-        # Type must be "topology"
         if pj.get("type") != "topology":
             self._add_issue(ERROR, "Schema",
                             f"'type' must be 'topology', got: {pj.get('type')}")
 
-        # Revision must be 9 (current GNS3 format)
         rev = pj.get("revision")
         if rev != 9:
             self._add_issue(ERROR, "Schema",
                             f"Revision must be 9, got: {rev}",
                             "GNS3 2.2+ uses revision 9")
 
-        # Version should be "2.2.x"
         ver = pj.get("version", "")
         if not ver.startswith("2.2"):
             self._add_issue(WARNING, "Schema",
                             f"Version '{ver}' may not be compatible with GNS3 2.2+")
 
-        # Topology must have nodes, links, computes
         topo = pj.get("topology", {})
         for key in ["nodes", "links"]:
             if key not in topo:
@@ -349,14 +231,13 @@ class GNS3ProjectValidator:
             self._add_issue(ERROR, "Nodes", "No nodes to validate")
             return
 
-        node_ids = set()
+        node_ids   = set()
         node_names = Counter()
 
         for i, node in enumerate(nodes):
-            name = node.get("name", f"<unnamed-{i}>")
+            name  = node.get("name", f"<unnamed-{i}>")
             ntype = node.get("node_type", "")
 
-            # Required fields
             required = ["node_id", "name", "node_type", "compute_id",
                         "x", "y", "properties"]
             for field in required:
@@ -364,13 +245,11 @@ class GNS3ProjectValidator:
                     self._add_issue(ERROR, "Nodes",
                                     f"Node '{name}' missing required field: {field}")
 
-            # Valid node type
             if ntype and ntype not in VALID_NODE_TYPES:
                 self._add_issue(ERROR, "Nodes",
                                 f"Node '{name}' has unknown node_type: {ntype}",
                                 f"Valid types: {', '.join(sorted(VALID_NODE_TYPES))}")
 
-            # Duplicate node_id check
             nid = node.get("node_id", "")
             if nid in node_ids:
                 self._add_issue(CRITICAL, "Nodes",
@@ -378,30 +257,31 @@ class GNS3ProjectValidator:
                                 "GNS3 will reject projects with duplicate node IDs")
             node_ids.add(nid)
 
-            # Duplicate name check
             node_names[name] += 1
             if node_names[name] > 1:
                 self._add_issue(WARNING, "Nodes",
                                 f"Duplicate node name: '{name}'",
                                 "GNS3 allows duplicate names but it's confusing")
 
-            # Properties should not be empty for appliance types
             props = node.get("properties", {})
             if ntype in APPLIANCE_NODE_TYPES and not props:
                 self._add_issue(CRITICAL, "Nodes",
                                 f"Node '{name}' ({ntype}) has empty properties",
                                 "GNS3 cannot create an appliance node without properties")
 
-            # Console type should match node type
-            # FIX: GNS3 schema uses null (Python None / JSON null) for nodes with no console,
-            # not the string "none". Valid enum: ["vnc", "telnet", "http", null]
+            # The GNS3 2.2 schema console_type enum includes both the string
+            # "none" AND JSON null as valid values.  Nodes that have no console
+            # (switches, hubs, NAT, etc.) should use null rather than "none" for
+            # maximum compatibility, but "none" will not cause an import error.
             ctype = node.get("console_type")
-            if ntype in ("ethernet_switch", "ethernet_hub", "cloud", "nat",
-                         "frame_relay_switch", "atm_switch", "traceng"):
-                if ctype is not None:
-                    self._add_issue(WARNING, "Nodes",
-                                    f"Node '{name}' ({ntype}) has console_type='{ctype}'",
-                                    "This node type should have console_type=null (no console)")
+            no_console_types = {
+                "ethernet_switch", "ethernet_hub", "cloud", "nat",
+                "frame_relay_switch", "atm_switch", "traceng",
+            }
+            if ntype in no_console_types and ctype not in (None, "none"):
+                self._add_issue(WARNING, "Nodes",
+                                f"Node '{name}' ({ntype}) has console_type='{ctype}'",
+                                "This node type should have console_type=null or 'none'")
 
         print(f"   Validated {len(nodes)} node(s)")
         if self.verbose:
@@ -418,8 +298,8 @@ class GNS3ProjectValidator:
             return
 
         for node in dynamips_nodes:
-            name = node.get("name", "?")
-            props = node.get("properties", {})
+            name     = node.get("name", "?")
+            props    = node.get("properties", {})
             platform = props.get("platform", "")
 
             if not platform:
@@ -436,18 +316,19 @@ class GNS3ProjectValidator:
 
             compat = DYNAMIPS_COMPAT[platform]
 
-            # Check image name matches platform
             image = props.get("image", "")
             if not image:
                 self._add_issue(ERROR, "Dynamips",
                                 f"Node '{name}' missing 'image' property",
                                 "Dynamips requires an IOS image filename")
-            elif not image.startswith(platform):
-                self._add_issue(WARNING, "Dynamips",
-                                f"Node '{name}' image '{image}' doesn't match platform '{platform}'",
-                                "Image should typically start with the platform name")
+            elif not image.startswith(platform[1:] if platform.startswith("c") else platform):
+                # Lenient check: image name should contain the platform digits
+                platform_digits = platform.lstrip("c")
+                if platform_digits not in image and platform not in image:
+                    self._add_issue(WARNING, "Dynamips",
+                                    f"Node '{name}' image '{image}' may not match platform '{platform}'",
+                                    "Image filename should typically contain the platform identifier")
 
-            # Check RAM
             ram = props.get("ram", 0)
             ram_min, ram_max = compat["ram_range"]
             if ram < ram_min:
@@ -459,29 +340,24 @@ class GNS3ProjectValidator:
                                 f"Node '{name}' RAM={ram}MB exceeds recommended {ram_max}MB",
                                 "May work but could waste resources")
 
-            # Check slot assignments
+            # Validate every slotN key present in properties
             slot_num = 0
             while True:
                 slot_key = f"slot{slot_num}"
                 if slot_key not in props:
                     break
-
                 module = props[slot_key]
-                if not module:
-                    # Empty slot — valid
-                    slot_num += 1
-                    continue
-
-                valid_modules = compat["slots"].get(slot_num, [])
-                if not valid_modules:
-                    self._add_issue(ERROR, "Dynamips",
-                                    f"Node '{name}' platform {platform} has no slot{slot_num}",
-                                    f"Platform {platform} supports slots 0-{max(compat['slots'].keys())}")
-                elif module not in valid_modules:
-                    self._add_issue(ERROR, "Dynamips",
-                                    f"Node '{name}' slot{slot_num}='{module}' is incompatible",
-                                    f"Platform {platform} slot{slot_num} supports: {', '.join(valid_modules)}")
-
+                if module:  # empty string = unoccupied slot, skip
+                    valid_modules = compat["slots"].get(slot_num)
+                    if valid_modules is None:
+                        self._add_issue(ERROR, "Dynamips",
+                                        f"Node '{name}' platform {platform} has no slot{slot_num}",
+                                        f"Max slot: {max(compat['slots'].keys())}")
+                    elif module not in valid_modules:
+                        self._add_issue(ERROR, "Dynamips",
+                                        f"Node '{name}' slot{slot_num}='{module}' is incompatible "
+                                        f"with platform {platform}",
+                                        f"Allowed: {', '.join(valid_modules)}")
                 slot_num += 1
 
         print(f"   Checked {len(dynamips_nodes)} Dynamips node(s)")
@@ -490,39 +366,35 @@ class GNS3ProjectValidator:
     def _check_port_integrity(self, nodes: List[dict], links: List[dict]):
         print("5. Checking port reference integrity...")
 
-        # Build node_id → node map
-        node_map = {n.get("node_id"): n for n in nodes}
+        node_map: Dict[str, dict] = {n.get("node_id"): n for n in nodes}
 
-        # Build node_id → set of (adapter, port) from the node's ports array
         node_port_map: Dict[str, Set[Tuple[int, int]]] = {}
         for node in nodes:
-            nid = node.get("node_id", "")
+            nid   = node.get("node_id", "")
             ports = node.get("ports", [])
-            port_set = set()
-            for p in ports:
-                port_set.add((p.get("adapter_number", 0), p.get("port_number", 0)))
-            node_port_map[nid] = port_set
+            node_port_map[nid] = {
+                (p.get("adapter_number", 0), p.get("port_number", 0))
+                for p in ports
+            }
 
-        # Check every link endpoint references a valid port on the node
         for i, link in enumerate(links):
             for ep in link.get("nodes", []):
-                nid = ep.get("node_id", "")
+                nid     = ep.get("node_id", "")
                 adapter = ep.get("adapter_number", 0)
-                port = ep.get("port_number", 0)
+                port    = ep.get("port_number", 0)
 
-                # Check node exists
                 if nid not in node_map:
                     self._add_issue(ERROR, "Ports",
                                     f"Link {i} references unknown node_id: {nid}")
                     continue
 
-                # Check port exists on the node
-                if node_port_map.get(nid) and (adapter, port) not in node_port_map[nid]:
+                port_set = node_port_map.get(nid)
+                if port_set and (adapter, port) not in port_set:
                     node_name = node_map[nid].get("name", "?")
                     self._add_issue(ERROR, "Ports",
                                     f"Link {i} references adapter{adapter}/port{port} "
                                     f"which doesn't exist on node '{node_name}'",
-                                    f"Available ports: {sorted(node_port_map[nid])}")
+                                    f"Available ports: {sorted(port_set)}")
 
         print(f"   Checked {len(links)} link(s)")
 
@@ -531,21 +403,15 @@ class GNS3ProjectValidator:
         print("6. Checking config file path consistency...")
 
         for node in nodes:
-            name = node.get("name", "?")
+            name  = node.get("name", "?")
             ntype = node.get("node_type", "")
-            nid = node.get("node_id", "")
+            nid   = node.get("node_id", "")
             props = node.get("properties", {})
 
-            # Check startup_config path for Dynamips/IOU
-            # GNS3 stores configs at: project-files/<node_type>/<uuid>/configs/startup-config.cfg
             if ntype in ("dynamips", "iou"):
                 startup_cfg = props.get("startup_config", "")
-                # Only check the ZIP file path if a path reference exists.
-                # If startup_config_content is directly in properties (the
-                # preferred method), no ZIP file is needed — don't warn.
                 if startup_cfg:
-                    type_dir = ntype
-                    standard_path = f"project-files/{type_dir}/{nid}/configs/startup-config.cfg"
+                    standard_path = f"project-files/{ntype}/{nid}/configs/startup-config.cfg"
                     if standard_path not in self.zip_files:
                         self._add_issue(WARNING, "ConfigPaths",
                                         f"Node '{name}': startup_config='{startup_cfg}' "
@@ -554,17 +420,15 @@ class GNS3ProjectValidator:
                                         f"If startup_config_content is in properties this is fine.")
                     if self.verbose:
                         found = standard_path in self.zip_files
-                        print(f"     {name}: {standard_path} → {'FOUND' if found else 'MISSING (using inline content)'}")
+                        print(f"     {name}: {standard_path} → "
+                              f"{'FOUND' if found else 'MISSING (using inline content)'}")
 
-            # Check VPCS startup script
             elif ntype == "vpcs":
                 startup_script = props.get("startup_script", "")
                 if startup_script:
-                    # Standard GNS3 path: project-files/vpcs/<uuid>/startup.vpc
                     standard_path = f"project-files/vpcs/{nid}/startup.vpc"
-                    legacy_path = f"files/{nid}/startup.vpc"
-                    found = standard_path in self.zip_files or legacy_path in self.zip_files
-                    if not found:
+                    legacy_path   = f"files/{nid}/startup.vpc"
+                    if standard_path not in self.zip_files and legacy_path not in self.zip_files:
                         self._add_issue(WARNING, "ConfigPaths",
                                         f"VPCS '{name}' has startup_script but no "
                                         f"startup.vpc in ZIP",
@@ -577,22 +441,20 @@ class GNS3ProjectValidator:
         print("7. Checking template IDs...")
 
         for node in nodes:
-            name = node.get("name", "?")
-            ntype = node.get("node_type", "")
+            name           = node.get("name", "?")
+            ntype          = node.get("node_type", "")
+            has_template   = "template_id" in node
 
-            has_template_id = "template_id" in node
-
-            if ntype in BUILTIN_NODE_TYPES and has_template_id:
+            if ntype in BUILTIN_NODE_TYPES and has_template:
                 self._add_issue(WARNING, "TemplateID",
                                 f"Built-in type '{name}' ({ntype}) has template_id",
-                                "Built-in types (vpcs, switches, etc.) should not have template_id")
-            elif ntype in APPLIANCE_NODE_TYPES and not has_template_id:
+                                "Built-in types should not carry a template_id")
+            elif ntype in APPLIANCE_NODE_TYPES and not has_template:
                 self._add_issue(WARNING, "TemplateID",
                                 f"Appliance type '{name}' ({ntype}) is missing template_id",
                                 "GNS3 will prompt the user to select a template during import")
 
-            # If template_id is present, check it's None or a valid UUID
-            if has_template_id:
+            if has_template:
                 tid = node.get("template_id")
                 if tid is not None:
                     try:
@@ -601,7 +463,7 @@ class GNS3ProjectValidator:
                     except (ValueError, AttributeError):
                         self._add_issue(ERROR, "TemplateID",
                                         f"Node '{name}' has invalid template_id: {tid}",
-                                        "Must be a valid UUID or None")
+                                        "Must be a valid UUID or null")
 
         print("   Template IDs: checked")
 
@@ -610,11 +472,7 @@ class GNS3ProjectValidator:
         print("8. Checking compute references...")
 
         compute_ids = {c.get("compute_id") for c in computes}
-
-        # "local" is a special GNS3 keyword for the built-in local server.
-        # It does NOT need to appear in the computes list — GNS3 always has it.
-        # Only non-local compute_ids (remote servers) must be listed.
-        LOCAL_IDS = {"local", "vm", None}  # common names for the local compute
+        LOCAL_IDS   = {"local", "vm", None}
 
         if not computes:
             self._add_issue(INFO, "Computes",
@@ -623,15 +481,14 @@ class GNS3ProjectValidator:
 
         for node in nodes:
             name = node.get("name", "?")
-            cid = node.get("compute_id", "")
+            cid  = node.get("compute_id", "")
 
             if not cid:
                 self._add_issue(ERROR, "Computes",
                                 f"Node '{name}' has no compute_id",
                                 "Every node must reference a compute")
             elif cid in LOCAL_IDS:
-                # "local" and equivalent IDs are always valid
-                pass
+                pass  # "local" is always valid
             elif cid not in compute_ids:
                 self._add_issue(ERROR, "Computes",
                                 f"Node '{name}' references compute_id '{cid}' "
@@ -645,13 +502,13 @@ class GNS3ProjectValidator:
         print("9. Checking switch VLAN assignments...")
 
         for node in nodes:
-            name = node.get("name", "?")
+            name  = node.get("name", "?")
             ntype = node.get("node_type", "")
 
             if ntype not in ("ethernet_switch", "ethernet_hub"):
                 continue
 
-            props = node.get("properties", {})
+            props        = node.get("properties", {})
             ports_mapping = props.get("ports_mapping", [])
 
             if not ports_mapping:
@@ -661,10 +518,10 @@ class GNS3ProjectValidator:
                 continue
 
             access_vlans = set()
-            trunk_count = 0
+            trunk_count  = 0
 
             for pm in ports_mapping:
-                vlan = pm.get("vlan", 1)
+                vlan  = pm.get("vlan", 1)
                 ptype = pm.get("type", "access")
 
                 if ptype == "access":
@@ -677,16 +534,12 @@ class GNS3ProjectValidator:
                 elif ptype == "dot1q":
                     trunk_count += 1
 
-            # Only warn about missing trunk if there are multiple distinct
-            # non-default VLANs — flat networks use VLAN 1 everywhere and
-            # never need a trunk port. This avoids false warnings for
-            # access-layer switches in simple flat topologies.
             non_default_vlans = access_vlans - {1}
             if non_default_vlans and trunk_count == 0:
                 self._add_issue(WARNING, "VLANs",
                                 f"Switch '{name}' has non-default VLANs {non_default_vlans} "
                                 f"on access ports but no dot1q trunk port",
-                                "These VLANs may not be routable without a trunk uplink to the router")
+                                "These VLANs may not be routable without a trunk uplink")
 
             if self.verbose:
                 print(f"     {name}: {len(ports_mapping)} ports, "
@@ -698,10 +551,9 @@ class GNS3ProjectValidator:
     def _check_links(self, nodes: List[dict], links: List[dict]):
         print("10. Checking link integrity...")
 
-        node_ids = {n.get("node_id") for n in nodes}
-
-        # Check for duplicate links (same pair of endpoints)
+        node_ids   = {n.get("node_id") for n in nodes}
         seen_pairs = set()
+
         for i, link in enumerate(links):
             eps = link.get("nodes", [])
 
@@ -710,22 +562,18 @@ class GNS3ProjectValidator:
                                 f"Link {i} has fewer than 2 endpoints")
                 continue
 
-            n0 = eps[0].get("node_id", "")
-            n1 = eps[1].get("node_id", "")
+            n0, n1 = eps[0].get("node_id", ""), eps[1].get("node_id", "")
 
-            # Self-link check
             if n0 == n1:
                 self._add_issue(ERROR, "Links",
                                 f"Link {i} is a self-link on node {n0}",
                                 "GNS3 does not support self-links")
 
-            # Both endpoints must reference valid nodes
             for ep in eps:
                 if ep.get("node_id") not in node_ids:
                     self._add_issue(ERROR, "Links",
                                     f"Link {i} references non-existent node: {ep.get('node_id')}")
 
-            # Duplicate link check
             pair = tuple(sorted([
                 (n0, eps[0].get("adapter_number", 0), eps[0].get("port_number", 0)),
                 (n1, eps[1].get("adapter_number", 0), eps[1].get("port_number", 0)),
@@ -736,7 +584,6 @@ class GNS3ProjectValidator:
                                 "Same pair of ports connected more than once")
             seen_pairs.add(pair)
 
-        # Check that every node with links has at least one port defined
         linked_nodes = set()
         for link in links:
             for ep in link.get("nodes", []):
@@ -759,23 +606,20 @@ class GNS3ProjectValidator:
             r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I
         )
 
-        # Check project_id
         pid = self.project_json.get("project_id", "")
-        if not uuid_pattern.match(pid):
+        if not uuid_pattern.match(str(pid)):
             self._add_issue(ERROR, "UUIDs",
                             f"project_id is not a valid UUID: {pid}")
 
-        # Check node IDs
         for node in nodes:
             nid = node.get("node_id", "")
-            if not uuid_pattern.match(nid):
+            if not uuid_pattern.match(str(nid)):
                 self._add_issue(ERROR, "UUIDs",
                                 f"Node '{node.get('name', '?')}' has invalid node_id: {nid}")
 
-        # Check link IDs
         for i, link in enumerate(links):
             lid = link.get("link_id", "")
-            if not uuid_pattern.match(lid):
+            if not uuid_pattern.match(str(lid)):
                 self._add_issue(ERROR, "UUIDs",
                                 f"Link {i} has invalid link_id: {lid}")
 
@@ -787,30 +631,25 @@ class GNS3ProjectValidator:
         print("  VALIDATION RESULTS")
         print(f"{'='*70}\n")
 
-        # Group issues by severity
         by_severity = {CRITICAL: [], ERROR: [], WARNING: [], INFO: []}
         for issue in self.issues:
             by_severity.get(issue["severity"], []).append(issue)
 
-        # Print each severity group
         for sev in [CRITICAL, ERROR, WARNING, INFO]:
             issues = by_severity[sev]
             if not issues:
                 continue
-
             icon = {"CRITICAL": "[!!!]", "ERROR": "[X]", "WARNING": "[!]", "INFO": "[i]"}[sev]
             print(f"  {icon} {sev} ({len(issues)}):")
             print(f"  {'-'*60}")
-
             for issue in issues:
                 print(f"  [{issue['category']}] {issue['message']}")
                 if issue["detail"] and self.verbose:
                     print(f"    → {issue['detail']}")
             print()
 
-        # Summary
-        print(f"{'-'*70}")
         total = sum(self.stats[k] for k in ["critical", "error", "warning", "info"])
+        print(f"{'-'*70}")
         print(f"  Total issues: {total}")
         print(f"    CRITICAL: {self.stats['critical']}  (GNS3 will refuse to import)")
         print(f"    ERROR:    {self.stats['error']}  (Nodes/links will fail at runtime)")
@@ -850,9 +689,8 @@ def main():
                         help="Show detailed information")
     args = parser.parse_args()
 
-
     validator = GNS3ProjectValidator(args.file, verbose=args.verbose)
-    success = validator.validate()
+    success   = validator.validate()
     sys.exit(0 if success else 1)
 
 
