@@ -970,12 +970,12 @@ def convert(
 
     abs_path = os.path.abspath(output_path)
 
-    print(f"[OK] '{project_name}'  →  {abs_path}")
+    print(f"[OK] '{project_name}'  ->  {abs_path}")
     print(f"     nodes:   {len(gns3_nodes)}")
     print(f"     links:   {len(gns3_links)}")
     print(f"     configs: {len(all_zip_configs)} file(s) packed")
     print()
-    print("Import: GNS3 GUI → File → Import portable project")
+    print("Import: GNS3 GUI -> File -> Import portable project")
 
     return abs_path
 

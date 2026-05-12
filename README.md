@@ -130,9 +130,16 @@ structranet-ai/
 │
 ├── gns3project_validator.py    # Deep structural validator for .gns3project files
 │
+├── tests/
+│   ├── test_golden_export.py   # Golden export + validator regression test
+│   └── fixtures/
+│       └── golden_minimal_topology.json
+│
 └── output/                     # Generated topology files
     ├── _topology.json          # Phase 1 output (hardware-injected)
-    └── final_topology.json     # Phase 2 output (software configs merged)
+    ├── final_topology.json     # Phase 2 output (software configs merged)
+    ├── preflight_profile.json  # Saved environment profile
+    └── generation_report.json  # Structured per-run report
 ```
 
 ### Module Responsibilities
@@ -239,6 +246,28 @@ print(f"Exported to: {path}")
 | `--project-output` | | Output `.gns3project` path |
 | `--no-validate` | | Skip post-export structural validation |
 | `--yes` | | Auto-approve interactive checkpoints |
+
+### Preflight Profile JSON
+
+The profile file allows non-interactive, backend/frontend-friendly runs:
+
+```json
+{
+  "gns3_version": "2.2.54",
+  "supports_iou": false,
+  "supports_qemu": true,
+  "supports_docker": false,
+  "strict_validation": true,
+  "require_template_image_map": true,
+  "template_image_map": {
+    "Cisco 3745": "c3745-adventerprisek9-mz.124-25d.image",
+    "Cisco 7200": "c7200-adventerprisek9-mz.124-24.T5.image"
+  }
+}
+```
+
+- When `require_template_image_map=true`, appliance nodes must use template names present in `template_image_map`.
+- During export, this map is passed to `gns3_exporter.convert(..., image_map=...)` to keep image selection deterministic.
 
 ### Environment Variables
 
@@ -368,15 +397,25 @@ python gns3project_validator.py <file.gns3project>
 python gns3project_validator.py <file.gns3project> --verbose
 ```
 
-### Post-Export Verification
+### Golden End-to-End Test
 
-The `gns3_exporter.verify_archive()` function provides built-in validation after every export:
+A regression test verifies export + validator against a known-good fixture:
 
-1. The file exists and is a valid ZIP archive
-2. `project.gns3` is present at the archive root
-3. `project.gns3` is valid JSON with expected top-level keys
-4. Node directories exist under `project-files/`
-5. No excluded files (captures, logs, snapshots) are present
+```bash
+python -m unittest tests.test_golden_export
+```
+
+This protects the core promise: generated `.gns3project` remains structurally importable.
+
+### Post-Generation Report
+
+Each run writes `output/generation_report.json` containing:
+
+1. Request text and timestamp
+2. Effective preflight profile used
+3. Compatibility findings and design-review assumptions
+4. Output paths (`_topology.json`, `final_topology.json`, `.gns3project`)
+5. Validator result (skipped/pass/fail)
 
 ---
 

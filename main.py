@@ -16,6 +16,7 @@ Supported flags:
 """
 
 import argparse
+from datetime import datetime, timezone
 import json
 import logging
 import os
@@ -28,9 +29,12 @@ from gns3_exporter import convert as export_gns3project
 from gns3project_validator import GNS3ProjectValidator
 from hw_config import DYNAMIPS_BUILTIN_PORTS, DYNAMIPS_BUILTIN_DEFAULT, DYNAMIPS_SLOT_MODULES
 from preflight import (
+    PreflightProfile,
     check_topology_compatibility,
     collect_profile_interactive,
+    filter_inventory_by_profile,
     load_profile,
+    profile_to_dict,
     save_profile,
 )
 from config_agent import run_phase2
@@ -92,7 +96,7 @@ _MAX_EXPANDABLE_PORTS = {
 
 def _build_design_review(
     topology_dict: dict,
-    profile,
+    profile: PreflightProfile,
     compatibility_issues: list[str],
 ) -> tuple[list[str], list[str]]:
     topo = topology_dict.get("topology", {})
@@ -229,11 +233,7 @@ def main():
         save_profile(profile, profile_path)
         print(f"[Preflight] Profile saved to: {profile_path}")
 
-    blocked_types = profile.unsupported_node_types
-    filtered_inventory = [
-        d for d in inventory
-        if str(d.get("gns3_type", "")).lower() not in blocked_types
-    ]
+    filtered_inventory, blocked_types = filter_inventory_by_profile(inventory, profile)
     if not filtered_inventory:
         print("[ERR] Profile blocks all available node types in inventory.")
         sys.exit(1)
@@ -345,24 +345,55 @@ def main():
         project_output = os.path.join(OUTPUT_DIR, f"{final_stem}.gns3project")
 
     try:
-        project_path = export_gns3project(final_dict, project_output)
+        project_path = export_gns3project(
+            final_dict,
+            project_output,
+            image_map=profile.normalized_template_image_map,
+        )
         print(f"  Export complete: {project_path}")
     except Exception as exc:
         print(f"[ERR] Export failed: {exc}")
         sys.exit(1)
 
     # ── Validation gate (optional) ────────────────────────────────────────────
+    validator_ok = None
     if args.no_validate:
         print("  Validation skipped (--no-validate)")
     else:
         print("  Running structural validator...")
         validator = GNS3ProjectValidator(project_path, verbose=False)
-        ok = validator.validate()
-        if ok:
+        validator_ok = validator.validate()
+        if validator_ok:
             print("  Validator result: PASS")
         else:
             print("[ERR] Validator result: FAIL (see issues above)")
-            sys.exit(1)
+    report = {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "request": user_request,
+        "profile": profile_to_dict(profile),
+        "phase2_skipped": bool(args.no_phase2),
+        "compatibility_issues": compatibility_issues,
+        "design_review": {
+            "thoughts": thoughts,
+            "assumptions": assumptions,
+        },
+        "outputs": {
+            "phase1_json": phase1_file,
+            "final_json": final_file,
+            "gns3project": project_path,
+        },
+        "validator": {
+            "skipped": bool(args.no_validate),
+            "passed": validator_ok,
+        },
+    }
+    report_path = os.path.join(OUTPUT_DIR, "generation_report.json")
+    with open(report_path, "w", encoding="utf-8") as rf:
+        json.dump(report, rf, indent=2)
+    print(f"  Generation report: {report_path}")
+
+    if validator_ok is False:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

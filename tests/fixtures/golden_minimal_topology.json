@@ -1,0 +1,54 @@
+{
+  "name": "golden_minimal",
+  "topology": {
+    "nodes": [
+      {
+        "node_id": "PC1",
+        "name": "PC1",
+        "node_type": "vpcs",
+        "template_name": "VPCS",
+        "compute_id": "local",
+        "properties": {
+          "startup_script": "ip 10.0.0.10/24 10.0.0.1\nsave\n"
+        }
+      },
+      {
+        "node_id": "SW1",
+        "name": "SW1",
+        "node_type": "ethernet_switch",
+        "template_name": "Ethernet Switch",
+        "compute_id": "local",
+        "properties": {
+          "ports_mapping": [
+            {
+              "name": "Ethernet0",
+              "port_number": 0,
+              "type": "access",
+              "vlan": 1,
+              "ethertype": ""
+            }
+          ]
+        }
+      }
+    ],
+    "links": [
+      {
+        "link_id": "L1",
+        "link_type": "ethernet",
+        "nodes": [
+          {
+            "node_id": "PC1",
+            "adapter_number": 0,
+            "port_number": 0
+          },
+          {
+            "node_id": "SW1",
+            "adapter_number": 0,
+            "port_number": 0
+          }
+        ]
+      }
+    ]
+  }
+}
+
