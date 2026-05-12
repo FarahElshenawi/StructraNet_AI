@@ -1,27 +1,30 @@
 """
-gns3_exporter.py — Structranet AI  ·  GNS3 Portable Project Exporter  (V4.2)
+gns3_exporter.py — Structranet AI  ·  GNS3 Portable Project Exporter  (V4.3)
 
 Converts final_topology.json → network.gns3project (a ZIP importable via
 GNS3 GUI → File → Import portable project).
 
-V4.2 changes vs V4.1
+V4.3 changes vs V4.2
 ─────────────────────
-  • Fixed hardware table bugs in _DYN_HW_DEFAULTS:
-      - c3745 slot0 was "Leopard-2FE" → corrected to "GT96100-FE"
-      - c3745 max_slots was 2 → corrected to 4
-      - c3660 max_slots was 5 → corrected to 6
-      - c3660 was missing slot0 entry → added "Leopard-2FE"
-    Source: gns3-gui/gns3/modules/dynamips/settings.py ADAPTER_MATRIX
+  Corrections based on GNS3 source (gns3-gui/settings.py ADAPTER_MATRIX):
 
-  • Added pre-export validation gate (_pre_export_validate) that runs
-    BEFORE writing any bytes to disk.  It catches the errors most likely
-    to cause a silent import failure or wrong runtime behaviour:
-      - Dynamips slot module incompatible with platform
-      - Link endpoint references an adapter with no installed slot module
-      - Switch access-VLAN > 1 with no dot1q trunk port (inter-VLAN silently broken)
-      - Placeholder IOS image (warning only — user may not have real image yet)
-    Errors abort the export and print a clear message.
-    Warnings are printed but do not block export.
+  • C1700-MB-1ETH → C1700-MB-1FE everywhere (correct Dynamips/GNS3 name).
+  • c3745/c3725/c2691 default_nm: NM-4E → NM-1FE-TX
+    (NM-4E is C3600-only; C3700_NMS = NM-1FE-TX, NM-4T, NM-16ESW)
+  • c3640/c3620 first_configurable corrected to 0 (no fixed slot 0).
+  • Added c3600 alias entry in _DYN_HW_DEFAULTS (GNS3 uses platform="c3600"
+    for all 3620/3640/3660 chassis).
+  • Added Leopard-2FE to _DYN_MODULE (was missing — caused wrong interface
+    names for c3660 slot 0).
+  • RAM defaults corrected:
+      c3725: 256 → 128 MB  (GNS3 default)
+      c3660: 256 → 192 MB  (GNS3 default for c3600 platform)
+      c3640: 256 → 128 MB
+      c3620: 256 → 128 MB
+      c2691: 256 → 192 MB  (GNS3 default)
+      c2600: 128 → 160 MB  (GNS3 default)
+      c1700: 128 → 160 MB  (GNS3 default)
+  • _DYN_BUILTIN updated to include c3600 alias.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
  GROUND TRUTH SOURCES
@@ -105,11 +108,18 @@ _BUILTIN_TYPES = frozenset([
 # ═══════════════════════════════════════════════════════════════════════════════
 #  Dynamips platform tables
 #
-#  FIX (V4.2): corrected _DYN_HW_DEFAULTS for c3745 and c3660.
-#  Source: gns3-gui/gns3/modules/dynamips/settings.py ADAPTER_MATRIX
+#  All corrections sourced from gns3-gui/settings.py ADAPTER_MATRIX:
 #
-#  c3745: slot0 = GT96100-FE (was wrongly "Leopard-2FE"), max_slots = 4 (was 2)
-#  c3660: slot0 = Leopard-2FE (was absent),               max_slots = 6 (was 5)
+#  C3700_NMS = ("NM-1FE-TX", "NM-4T", "NM-16ESW")
+#    → c3745 / c3725 / c2691 default_nm must be NM-1FE-TX, NOT NM-4E
+#
+#  C3600_NMS = ("NM-1FE-TX", "NM-1E", "NM-4E", "NM-1D", "NM-4T", "NM-16ESW")
+#    → c3660 / c3640 / c3620 default_nm = NM-4E (correct, unchanged)
+#
+#  C1700: slot 0 = "C1700-MB-1FE" (corrected from "C1700-MB-1ETH")
+#
+#  RAM defaults from GNS3 PLATFORMS_DEFAULT_RAM:
+#    c1700=160, c2600=160, c2691=192, c3600=192, c3725=128, c3745=256, c7200=512
 # ═══════════════════════════════════════════════════════════════════════════════
 
 _DYN_BUILTIN: Dict[str, Dict[str, Any]] = {
@@ -117,50 +127,91 @@ _DYN_BUILTIN: Dict[str, Dict[str, Any]] = {
     "c3745": {"prefix": "FastEthernet",  "count": 2},   # GT96100-FE
     "c3725": {"prefix": "FastEthernet",  "count": 2},   # GT96100-FE
     "c3660": {"prefix": "FastEthernet",  "count": 2},   # Leopard-2FE
-    "c3640": {"prefix": None,            "count": 0},   # no fixed slot0
-    "c3620": {"prefix": None,            "count": 0},   # no fixed slot0
+    "c3640": {"prefix": None,            "count": 0},   # no fixed slot 0
+    "c3620": {"prefix": None,            "count": 0},   # no fixed slot 0
     "c2691": {"prefix": "FastEthernet",  "count": 2},   # GT96100-FE
     "c2600": {"prefix": "FastEthernet",  "count": 1},
     "c1700": {"prefix": "FastEthernet",  "count": 1},
+    # c3600 alias (GNS3 platform field for all c36xx chassis)
+    "c3600": {"prefix": "FastEthernet",  "count": 2},   # Leopard-2FE or GT96100-FE
 }
 
+# _DYN_MODULE: all module names that can appear in slotN properties.
+# Key correction: C1700-MB-1ETH → C1700-MB-1FE
+# Added: Leopard-2FE (was missing — needed for c3660 slot 0 interface naming)
 _DYN_MODULE: Dict[str, Dict[str, Any]] = {
-    "PA-8E":       {"prefix": "Ethernet",        "count": 8},
-    "PA-4E":       {"prefix": "Ethernet",        "count": 4},
-    "PA-FE-TX":    {"prefix": "FastEthernet",    "count": 1},
-    "PA-2FE-TX":   {"prefix": "FastEthernet",    "count": 2},
-    "PA-GE":       {"prefix": "GigabitEthernet", "count": 1},
-    "NM-4E":       {"prefix": "Ethernet",        "count": 4},
-    "NM-1E":       {"prefix": "Ethernet",        "count": 1},
-    "NM-1FE-TX":   {"prefix": "FastEthernet",    "count": 1},
-    "NM-16ESW":    {"prefix": "FastEthernet",    "count": 16},
-    "GT96100-FE":  {"prefix": "FastEthernet",    "count": 2},
-    "Leopard-2FE": {"prefix": "FastEthernet",    "count": 2},
-    "C7200-IO-FE":   {"prefix": "FastEthernet",    "count": 1},
-    "C7200-IO-2FE":  {"prefix": "FastEthernet",    "count": 2},
-    "C7200-IO-GE-E": {"prefix": "GigabitEthernet", "count": 1},
-    "C1700-MB-1ETH": {"prefix": "FastEthernet",    "count": 1},
-    "PA-4T+":      {"prefix": "Serial",          "count": 4},
-    "PA-8T":       {"prefix": "Serial",          "count": 8},
-    "NM-4T":       {"prefix": "Serial",          "count": 4},
-    "NM-1T":       {"prefix": "Serial",          "count": 1},
+    # C7200 PA modules
+    "PA-8E":          {"prefix": "Ethernet",        "count": 8},
+    "PA-4E":          {"prefix": "Ethernet",        "count": 4},
+    "PA-FE-TX":       {"prefix": "FastEthernet",    "count": 1},
+    "PA-2FE-TX":      {"prefix": "FastEthernet",    "count": 2},
+    "PA-GE":          {"prefix": "GigabitEthernet", "count": 1},
+    # C3600/C3700 NM modules
+    "NM-4E":          {"prefix": "Ethernet",        "count": 4},
+    "NM-1E":          {"prefix": "Ethernet",        "count": 1},
+    "NM-1FE-TX":      {"prefix": "FastEthernet",    "count": 1},
+    "NM-16ESW":       {"prefix": "FastEthernet",    "count": 16},
+    # Motherboard chips
+    "GT96100-FE":     {"prefix": "FastEthernet",    "count": 2},
+    "Leopard-2FE":    {"prefix": "FastEthernet",    "count": 2},
+    # C7200 I/O controllers
+    "C7200-IO-FE":    {"prefix": "FastEthernet",    "count": 1},
+    "C7200-IO-2FE":   {"prefix": "FastEthernet",    "count": 2},
+    "C7200-IO-GE-E":  {"prefix": "GigabitEthernet", "count": 1},
+    # C1700 motherboard — CORRECTED: C1700-MB-1ETH → C1700-MB-1FE
+    "C1700-MB-1FE":   {"prefix": "FastEthernet",    "count": 1},
+    # Serial modules
+    "PA-4T+":         {"prefix": "Serial",          "count": 4},
+    "PA-8T":          {"prefix": "Serial",          "count": 8},
+    "NM-4T":          {"prefix": "Serial",          "count": 4},
+    "NM-1T":          {"prefix": "Serial",          "count": 1},
 }
 
 _DYN_HW_DEFAULTS: Dict[str, Dict[str, Any]] = {
-    # c7200: slot0 is an I/O controller, expansion PAs go in slots 1-6
-    "c7200": {"ram": 512,  "slot0": "C7200-IO-FE",  "default_nm": "PA-8E",  "max_slots": 6},
-    # c3745: slot0 = GT96100-FE (2-port FE chip), 4 NM expansion slots (1-4)
-    "c3745": {"ram": 256,  "slot0": "GT96100-FE",   "default_nm": "NM-4E",  "max_slots": 4},
-    # c3725: slot0 = GT96100-FE, 2 NM expansion slots (1-2)
-    "c3725": {"ram": 256,  "slot0": "GT96100-FE",   "default_nm": "NM-4E",  "max_slots": 2},
-    # c3660: slot0 = Leopard-2FE (2-port FE chip), 6 NM expansion slots (1-6)
-    "c3660": {"ram": 256,  "slot0": "Leopard-2FE",  "default_nm": "NM-4E",  "max_slots": 6},
-    # c3640/c3620: no fixed slot0 — all slots are user NM modules
-    "c3640": {"ram": 256,                            "default_nm": "NM-4E",  "max_slots": 4},
-    "c3620": {"ram": 256,                            "default_nm": "NM-4E",  "max_slots": 2},
-    "c2691": {"ram": 256,  "slot0": "GT96100-FE",   "default_nm": "NM-4E",  "max_slots": 1},
-    "c2600": {"ram": 128,  "slot0": "NM-1FE-TX",    "default_nm": "NM-1E",  "max_slots": 1},
-    "c1700": {"ram": 128,  "slot0": "C1700-MB-1ETH","default_nm": "NM-1E",  "max_slots": 1},
+    # c7200: slot 0 = I/O controller, expansion PAs in slots 1-6
+    # RAM: 512 MB (GNS3 default)
+    "c7200": {"ram": 512,  "slot0": "C7200-IO-FE",  "default_nm": "PA-8E",    "max_slots": 6},
+
+    # c3745: slot 0 = GT96100-FE (fixed), 4 NM slots
+    # default_nm CORRECTED: NM-4E → NM-1FE-TX (NM-4E is C3600-only)
+    # RAM: 256 MB (GNS3 default)
+    "c3745": {"ram": 256,  "slot0": "GT96100-FE",   "default_nm": "NM-1FE-TX","max_slots": 4},
+
+    # c3725: slot 0 = GT96100-FE (fixed), 2 NM slots
+    # default_nm CORRECTED: NM-4E → NM-1FE-TX
+    # RAM CORRECTED: 256 → 128 MB (GNS3 default)
+    "c3725": {"ram": 128,  "slot0": "GT96100-FE",   "default_nm": "NM-1FE-TX","max_slots": 2},
+
+    # c3660: slot 0 = Leopard-2FE (fixed), 6 NM slots
+    # default_nm correct: NM-4E is valid C3600_NMS
+    # RAM CORRECTED: 256 → 192 MB (GNS3 default for c3600 platform)
+    "c3660": {"ram": 192,  "slot0": "Leopard-2FE",  "default_nm": "NM-4E",    "max_slots": 6},
+
+    # c3640: no fixed slot 0, all 4 slots user-configurable
+    # RAM CORRECTED: 256 → 128 MB
+    "c3640": {"ram": 128,                            "default_nm": "NM-4E",    "max_slots": 4},
+
+    # c3620: no fixed slot 0, 2 NM slots
+    # RAM CORRECTED: 256 → 128 MB
+    "c3620": {"ram": 128,                            "default_nm": "NM-4E",    "max_slots": 2},
+
+    # c2691: slot 0 = GT96100-FE (fixed), 1 NM slot
+    # default_nm CORRECTED: NM-4E → NM-1FE-TX
+    # RAM CORRECTED: 256 → 192 MB (GNS3 default)
+    "c2691": {"ram": 192,  "slot0": "GT96100-FE",   "default_nm": "NM-1FE-TX","max_slots": 1},
+
+    # c2600: slot 0 = motherboard (varies), 1 NM slot
+    # default_nm: NM-1E (safe C3600_NMS choice for single-port expansion)
+    # RAM CORRECTED: 128 → 160 MB (GNS3 default)
+    "c2600": {"ram": 160,  "slot0": "NM-1FE-TX",    "default_nm": "NM-1E",    "max_slots": 1},
+
+    # c1700: slot 0 = C1700-MB-1FE (CORRECTED from C1700-MB-1ETH), NO NM slots
+    # RAM CORRECTED: 128 → 160 MB (GNS3 default)
+    "c1700": {"ram": 160,  "slot0": "C1700-MB-1FE", "default_nm": "NM-1FE-TX","max_slots": 0},
+
+    # c3600 alias: GNS3 uses platform="c3600" for all c36xx chassis.
+    # Default to c3660 spec as it's the most capable.
+    "c3600": {"ram": 192,  "slot0": "Leopard-2FE",  "default_nm": "NM-4E",    "max_slots": 6},
 }
 
 _NODE_TYPE_DIR: Dict[str, str] = {
@@ -187,32 +238,21 @@ def _pre_export_validate(nodes: List[dict], links: List[dict]) -> None:
 
     Raises ExportError listing ALL blocking issues found (not just the first).
     Prints warnings for non-blocking issues that the user should be aware of.
-
-    Checks performed:
-      1. Dynamips slot modules are compatible with the node's platform
-      2. Every link endpoint's adapter has a module installed (for Dynamips)
-      3. Ethernet switches with non-default VLANs have at least one dot1q trunk port
-      4. Placeholder IOS images (warning only)
     """
     errors:   List[str] = []
     warnings: List[str] = []
 
     node_map: Dict[str, dict] = {n.get("node_id", ""): n for n in nodes}
 
-    # ── Build per-node set of adapters that actually have a module ────────────
-    # For Dynamips: adapter 0 is covered by built-in OR slot0 module.
-    # Adapters 1+ require a slotN key in properties.
     def _dynamips_installed_adapters(node: dict) -> set:
         props    = node.get("properties", {})
         platform = str(props.get("platform", node.get("template_name", ""))).lower()
         builtin  = _DYN_BUILTIN.get(platform, {})
         installed = set()
 
-        # Adapter 0: covered if platform has built-in ports OR slot0 is set
         if builtin.get("count", 0) > 0 or props.get("slot0"):
             installed.add(0)
 
-        # Adapters 1+: covered if slotN is set to a non-empty module
         hw = _DYN_HW_DEFAULTS.get(platform, {})
         max_slots = hw.get("max_slots", 4)
         for slot_num in range(1, max_slots + 1):
@@ -221,7 +261,7 @@ def _pre_export_validate(nodes: List[dict], links: List[dict]) -> None:
 
         return installed
 
-    # ── Check 1: Dynamips slot compatibility ─────────────────────────────────
+    # Check 1: Dynamips slot compatibility
     for node in nodes:
         if node.get("node_type") != "dynamips":
             continue
@@ -230,7 +270,6 @@ def _pre_export_validate(nodes: List[dict], links: List[dict]) -> None:
         platform = str(props.get("platform", "")).lower()
 
         if not platform or platform not in DYNAMIPS_COMPAT:
-            # Missing platform will be caught elsewhere; skip slot check
             continue
 
         compat = DYNAMIPS_COMPAT[platform]
@@ -255,7 +294,6 @@ def _pre_export_validate(nodes: List[dict], links: List[dict]) -> None:
                     )
             slot_num += 1
 
-        # Check 4: placeholder image warning
         image = props.get("image", "")
         if image and ("placeholder" in image.lower() or image.endswith(".bin")):
             warnings.append(
@@ -263,7 +301,7 @@ def _pre_export_validate(nodes: List[dict], links: List[dict]) -> None:
                 f"GNS3 will fail to start this node unless a real IOS image is installed."
             )
 
-    # ── Check 2: Link endpoints reference installed adapters ─────────────────
+    # Check 2: Link endpoints reference installed adapters
     for i, link in enumerate(links):
         for ep in link.get("nodes", []):
             nid     = ep.get("node_id", "")
@@ -280,7 +318,7 @@ def _pre_export_validate(nodes: List[dict], links: List[dict]) -> None:
                     f"interface will not exist in IOS."
                 )
 
-    # ── Check 3: Switch VLAN / trunk consistency ──────────────────────────────
+    # Check 3: Switch VLAN / trunk consistency
     for node in nodes:
         if node.get("node_type") != "ethernet_switch":
             continue
@@ -289,7 +327,6 @@ def _pre_export_validate(nodes: List[dict], links: List[dict]) -> None:
         ports_mapping = props.get("ports_mapping", [])
 
         if not ports_mapping:
-            # hw_config should have created this; if missing the switch won't work
             errors.append(
                 f"Switch '{name}' has no ports_mapping. "
                 f"Run hw_config.inject_hardware_config() before exporting."
@@ -307,13 +344,11 @@ def _pre_export_validate(nodes: List[dict], links: List[dict]) -> None:
                 f"Run topology_finalizer.apply_switch_port_patches() before exporting."
             )
 
-    # ── Emit warnings ─────────────────────────────────────────────────────────
     if warnings:
         print("\n[pre-export WARNINGS]")
         for w in warnings:
             print(f"  [!] {w}")
 
-    # ── Raise on errors ───────────────────────────────────────────────────────
     if errors:
         msg = "\n[pre-export ERRORS — export aborted]\n"
         for e in errors:
@@ -558,7 +593,7 @@ def _clean_properties(node: dict) -> dict:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  Hardware property injection  (gap-filling only — trusts hw_config output)
+#  Hardware property injection (gap-filling — trusts hw_config output)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _detect_dynamips_platform(props: dict, template: str) -> str:
@@ -580,9 +615,7 @@ def _inject_dynamips_properties(
     node: dict, props: dict, template: str, links: List[dict]
 ) -> None:
     """Fill in any Dynamips properties that hw_config didn't set.
-
-    Uses setdefault / 'if not in props' throughout so hw_config output
-    is never overwritten.
+    Uses setdefault throughout so hw_config output is never overwritten.
     """
     platform = _detect_dynamips_platform(props, template)
     hw       = _DYN_HW_DEFAULTS.get(platform, _DYN_HW_DEFAULTS["c3745"])
@@ -598,7 +631,6 @@ def _inject_dynamips_properties(
             node.get("name", "?"), placeholder,
         )
 
-    # slot0: only for platforms that have a fixed slot0 module
     if "slot0" not in props and "slot0" in hw:
         props["slot0"] = hw["slot0"]
 
@@ -624,7 +656,6 @@ def _inject_dynamips_properties(
         if slot_key not in props:
             props[slot_key] = serial_nm if slot_num in serial_adapter_set else default_nm
 
-    # Ensure slot0 is set if adapter 0 is used by a link
     if "slot0" not in props:
         for link in links:
             for ep in link.get("nodes", []):
@@ -705,24 +736,18 @@ def convert(
     name_override: str = None,
     image_map: Dict[str, str] = None,
 ) -> str:
-    """Convert a topology dict to a .gns3project ZIP.
-
-    Raises ExportError before writing anything if blocking pre-export
-    validation issues are found (wrong slot modules, missing trunk ports, etc.).
-    """
+    """Convert a topology dict to a .gns3project ZIP."""
     image_map = image_map or {}
 
     project_name, nodes_in, links_in = _normalise_input(input_data)
     if name_override:
         project_name = name_override
 
-    # ── Hardware gap-filling (runs before validation so injected props are checked) ──
     for n in nodes_in:
         if n.get("node_type") == "dynamips" and n.get("template_name") in image_map:
             n.setdefault("properties", {})["image"] = image_map[n["template_name"]]
         _inject_hardware_properties(n, links_in)
 
-    # IOU application_id — assign before validation so the check sees them
     iou_application_id_counter = 1
     for n in nodes_in:
         if n.get("node_type") == "iou":
@@ -731,10 +756,8 @@ def convert(
                 props["application_id"] = iou_application_id_counter
             iou_application_id_counter += 1
 
-    # ── Pre-export validation gate ────────────────────────────────────────────
     _pre_export_validate(nodes_in, links_in)
 
-    # ── UUID + layout ─────────────────────────────────────────────────────────
     project_uuid, node_uuid_map = _assign_uuids(project_name, nodes_in)
     positions = _grid_positions(nodes_in)
     node_lookup: Dict[str, dict] = {n.get("node_id", ""): n for n in nodes_in}

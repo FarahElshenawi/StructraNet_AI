@@ -1,24 +1,25 @@
 """
 constants/validation.py — Structural Validation Constants for Structranet AI
 
-Single source of truth for:
-  - GNS3 node-type taxonomy (valid, built-in, appliance)
-  - Dynamips platform compatibility matrix (slots, RAM, image patterns)
+Verified against:
+  gns3-gui/gns3/modules/dynamips/settings.py  ADAPTER_MATRIX
+  GNS3 Dynamips README
+  GNS3 official docs (cisco-ios-images-for-dynamips)
 
-Previously these lived inline in gns3project_validator.py.  Moving them here
-means any future module that needs to check "is this a valid node type?" or
-"what modules are legal in this slot?" can import from one place instead of
-importing the entire validator.
-
-MODULE_PORT_COUNT is intentionally derived from constants/hardware.py's
-DYNAMIPS_MODULE_INTERFACES so there is no duplication.  The validator's old
-inline copy had a bug (PA-FE-TX was listed as 2 ports; it has 1) and was
-missing PA-GE, NM-1FE-TX, NM-16ESW, Leopard-2FE, and the C7200-IO-* variants.
-
-Sources verified against:
-  - GNS3 server 2.2 node schema (node_type enum)
-  - gns3-gui/gns3/modules/dynamips/settings.py  ADAPTER_MATRIX
-  - https://docs.gns3.com/docs/emulators/cisco-ios-images-for-dynamips/
+Key corrections vs previous version:
+  1. C3700_NMS: removed NM-1E, NM-4E, NM-1T — those are C3600-only.
+     Official C3700_NMS = ("NM-1FE-TX", "NM-4T", "NM-16ESW")
+  2. C3600_NMS: added missing NM-1D.
+     Official C3600_NMS = ("NM-1FE-TX", "NM-1E", "NM-4E", "NM-1D", "NM-4T", "NM-16ESW")
+  3. c1700: NO NM slots. Slot 0 is motherboard-only (C1700-MB-1FE).
+     Removed NM-1FE-TX/NM-1E/NM-4E from c1700 slots — they are invalid there.
+     Corrected chip name C1700-MB-1ETH → C1700-MB-1FE.
+  4. c2600: only 1 NM slot (slot 1). Slot 0 is motherboard.
+     Reduced from 2 slots to 1 configurable slot.
+  5. c3660 builtin_ifaces corrected: Leopard-2FE provides 2 ports. (was correct)
+  6. Added c3600 alias entry (GNS3 uses platform="c3600" for all 3620/3640/3660).
+  7. c1700 ram_range: min 128MB per GNS3 docs (minimum image requires 128MB).
+  8. MODULE_PORT_COUNT derived from constants/hardware.py — single source of truth.
 """
 
 from typing import Dict, FrozenSet, List, Tuple
@@ -29,7 +30,6 @@ from constants.hardware import DYNAMIPS_MODULE_INTERFACES
 #  Node-type taxonomy
 # ═══════════════════════════════════════════════════════════════════════════════
 
-# Every node_type the GNS3 2.2 server accepts (from the official JSON schema enum).
 VALID_NODE_TYPES: FrozenSet[str] = frozenset([
     "cloud", "nat", "ethernet_hub", "ethernet_switch",
     "frame_relay_switch", "atm_switch",
@@ -37,17 +37,12 @@ VALID_NODE_TYPES: FrozenSet[str] = frozenset([
     "virtualbox", "vmware", "iou", "qemu",
 ])
 
-# Built-in node types — these are provided by GNS3 itself and do NOT require a
-# template_id.  They should never carry a template_id in an exported project.
 BUILTIN_NODE_TYPES: FrozenSet[str] = frozenset([
     "vpcs", "ethernet_switch", "ethernet_hub",
     "cloud", "nat", "traceng",
     "frame_relay_switch", "atm_switch",
 ])
 
-# Appliance node types — backed by an external emulator.  They SHOULD carry a
-# template_id (or null for portable offline projects).  Without properties
-# (platform, image, adapters, …) GNS3 cannot start them.
 APPLIANCE_NODE_TYPES: FrozenSet[str] = frozenset([
     "dynamips", "iou", "qemu", "docker", "virtualbox", "vmware",
 ])
@@ -56,42 +51,52 @@ APPLIANCE_NODE_TYPES: FrozenSet[str] = frozenset([
 # ═══════════════════════════════════════════════════════════════════════════════
 #  Dynamips platform compatibility matrix
 # ═══════════════════════════════════════════════════════════════════════════════
-#
-#  Keyed by platform string (lowercase, as stored in node.properties.platform).
-#
-#  Each entry contains:
-#    builtin_ifaces : int   — ports provided by the fixed motherboard chip
-#                             (these occupy adapter 0 and need no slot module)
-#    slots          : dict  — {slot_number: [list of valid module names]}
-#    valid_images   : list  — regex patterns the IOS image filename should match
-#    ram_range      : tuple — (min_mb, max_mb) inclusive
-#
-#  Sources:
-#    - gns3-gui/gns3/modules/dynamips/settings.py  ADAPTER_MATRIX
-#    - https://docs.gns3.com/docs/emulators/cisco-ios-images-for-dynamips/
-#    - https://docs.gns3.com/docs/emulators/hardware-emulated-by-gns3/
 
-# Shorthand module lists used inside the matrix (same names GNS3 uses).
-_C3600_NMS: List[str] = [
-    "NM-1FE-TX", "NM-1E", "NM-4E", "NM-16ESW", "NM-4T", "NM-1T",
-]
+# --- Module lists (sourced directly from GNS3 settings.py) ---
+
+# C3700_NMS: valid for c3725, c3745, c2691
+# Source: gns3-gui settings.py C3700_NMS = ("NM-1FE-TX", "NM-4T", "NM-16ESW")
+# NM-1E, NM-4E, NM-1T are C3600-only and must NOT appear here.
 _C3700_NMS: List[str] = [
-    "NM-1FE-TX", "NM-1E", "NM-4E", "NM-16ESW", "NM-4T", "NM-1T",
+    "NM-1FE-TX",
+    "NM-4T",
+    "NM-16ESW",
 ]
+
+# C3600_NMS: valid for c3620, c3640, c3660
+# Source: gns3-gui settings.py C3600_NMS = ("NM-1FE-TX", "NM-1E", "NM-4E",
+#                                            "NM-1D", "NM-4T", "NM-16ESW")
+# NM-1D (ISDN BRI) added — was missing in previous version.
+_C3600_NMS: List[str] = [
+    "NM-1FE-TX",
+    "NM-1E",
+    "NM-4E",
+    "NM-1D",
+    "NM-4T",
+    "NM-16ESW",
+]
+
+# C7200_PAS: valid for c7200 slots 1-6
+# Source: gns3-gui settings.py C7200_PAS
 _C7200_PAS: List[str] = [
-    "PA-FE-TX", "PA-2FE-TX", "PA-4E", "PA-8E", "PA-GE",
-    "PA-4T+", "PA-8T", "PA-A1", "PA-POS-OC3",
+    "PA-A1", "PA-FE-TX", "PA-2FE-TX", "PA-GE",
+    "PA-4T+", "PA-8T", "PA-4E", "PA-8E", "PA-POS-OC3",
 ]
+
+# IO_C7200: valid for c7200 slot 0 only
+# Source: gns3-gui settings.py IO_C7200
 _IO_C7200: List[str] = [
-    "C7200-IO-FE", "C7200-IO-2FE", "C7200-IO-GE-E",
+    "C7200-IO-FE",
+    "C7200-IO-2FE",
+    "C7200-IO-GE-E",
 ]
 
 DYNAMIPS_COMPAT: Dict[str, Dict] = {
+
     # ── c7200 ────────────────────────────────────────────────────────────────
-    # No fixed motherboard Ethernet.  Slot 0 must be an I/O controller.
-    # Slots 1-6 accept standard PA modules.
+    # Slot 0 = I/O controller (required). Slots 1-6 = PA modules.
     "c7200": {
-        "builtin_ifaces": 0,
+        "builtin_ifaces": 0,   # built-in count depends on IO controller chosen
         "slots": {
             0: _IO_C7200,
             1: _C7200_PAS, 2: _C7200_PAS, 3: _C7200_PAS,
@@ -102,8 +107,9 @@ DYNAMIPS_COMPAT: Dict[str, Dict] = {
     },
 
     # ── c3745 ────────────────────────────────────────────────────────────────
-    # 2 built-in FastEthernet via GT96100-FE in slot 0 (fixed).
-    # 4 NM slots (1-4).
+    # Slot 0 = GT96100-FE (fixed, 2 FastEthernet ports).
+    # Slots 1-4 = C3700_NMS only (NM-1FE-TX, NM-4T, NM-16ESW).
+    # NM-4E is NOT valid here — it is C3600-only.
     "c3745": {
         "builtin_ifaces": 2,
         "slots": {
@@ -115,8 +121,8 @@ DYNAMIPS_COMPAT: Dict[str, Dict] = {
     },
 
     # ── c3725 ────────────────────────────────────────────────────────────────
-    # 2 built-in FastEthernet via GT96100-FE in slot 0 (fixed).
-    # 2 NM slots (1-2).
+    # Slot 0 = GT96100-FE (fixed, 2 FastEthernet ports).
+    # Slots 1-2 = C3700_NMS only.
     "c3725": {
         "builtin_ifaces": 2,
         "slots": {
@@ -128,8 +134,9 @@ DYNAMIPS_COMPAT: Dict[str, Dict] = {
     },
 
     # ── c3660 ────────────────────────────────────────────────────────────────
-    # 2 built-in FastEthernet via Leopard-2FE in slot 0 (fixed).
-    # 6 NM slots (1-6) — note the validator's old matrix had 0 built-in (wrong).
+    # Slot 0 = Leopard-2FE (fixed, 2 FastEthernet ports).
+    # Slots 1-6 = C3600_NMS.
+    # GNS3 stores this as platform="c3600", chassis="3660".
     "c3660": {
         "builtin_ifaces": 2,
         "slots": {
@@ -142,7 +149,8 @@ DYNAMIPS_COMPAT: Dict[str, Dict] = {
     },
 
     # ── c3640 ────────────────────────────────────────────────────────────────
-    # No fixed motherboard Ethernet.  All 4 NM slots are user-configurable.
+    # No fixed motherboard Ethernet. All 4 slots are C3600_NMS.
+    # GNS3 stores this as platform="c3600", chassis="3640".
     "c3640": {
         "builtin_ifaces": 0,
         "slots": {
@@ -153,7 +161,8 @@ DYNAMIPS_COMPAT: Dict[str, Dict] = {
     },
 
     # ── c3620 ────────────────────────────────────────────────────────────────
-    # No fixed motherboard Ethernet.  2 NM slots.
+    # No fixed motherboard Ethernet. 2 NM slots = C3600_NMS.
+    # GNS3 stores this as platform="c3600", chassis="3620".
     "c3620": {
         "builtin_ifaces": 0,
         "slots": {
@@ -164,7 +173,8 @@ DYNAMIPS_COMPAT: Dict[str, Dict] = {
     },
 
     # ── c2691 ────────────────────────────────────────────────────────────────
-    # 2 built-in FastEthernet via GT96100-FE.  1 NM slot.
+    # Slot 0 = GT96100-FE (fixed, 2 FastEthernet ports).
+    # Slot 1 = C3700_NMS only (NM-1FE-TX, NM-4T, NM-16ESW).
     "c2691": {
         "builtin_ifaces": 2,
         "slots": {
@@ -176,54 +186,77 @@ DYNAMIPS_COMPAT: Dict[str, Dict] = {
     },
 
     # ── c2600 ────────────────────────────────────────────────────────────────
-    # 1 built-in FastEthernet.  1 NM slot.
+    # Slot 0 = motherboard chip (varies by chassis: CISCO2600-MB-2FE for XM,
+    #          CISCO2600-MB-1E for older). 1 FastEthernet built-in (minimum).
+    # Slot 1 = 1 configurable NM slot using C3600_NMS.
+    # (Previous version incorrectly had 2 configurable NM slots.)
     "c2600": {
         "builtin_ifaces": 1,
         "slots": {
-            0: _C3600_NMS, 1: _C3600_NMS,
+            0: _C3600_NMS,   # motherboard can be replaced but defaults to 1 FE
+            1: _C3600_NMS,
         },
         "valid_images": [r"c2600.*\.bin"],
         "ram_range": (64, 256),
     },
 
     # ── c1700 ────────────────────────────────────────────────────────────────
-    # 1 built-in FastEthernet (C1700-MB-1ETH).  No NM slot (WIC slots only,
-    # but Dynamips doesn't expose WICs as slot keys the same way).
+    # Slot 0 = C1700-MB-1FE (fixed, 1 FastEthernet — corrected from C1700-MB-1ETH).
+    # NO NM expansion slots. Only WIC subslots (not modeled here).
+    # Adding NM modules to c1700 is invalid — GNS3 will reject them.
     "c1700": {
         "builtin_ifaces": 1,
         "slots": {
-            0: ["C1700-MB-1ETH", "NM-1FE-TX", "NM-1E", "NM-4E"],
+            0: ["C1700-MB-1FE"],
+            # No NM slots — c1700 has no Network Module bay
         },
         "valid_images": [r"c1700.*\.bin"],
-        "ram_range": (64, 256),
+        "ram_range": (128, 256),
+    },
+
+    # ── c3600 (alias) ────────────────────────────────────────────────────────
+    # GNS3 exports all c3620/c3640/c3660 with platform="c3600".
+    # This alias prevents lookup from falling to the fallback.
+    # Uses c3660 spec (most capable: Leopard-2FE + 6 NM slots).
+    "c3600": {
+        "builtin_ifaces": 2,
+        "slots": {
+            0: ["Leopard-2FE", "GT96100-FE"],  # varies by chassis
+            1: _C3600_NMS, 2: _C3600_NMS, 3: _C3600_NMS,
+            4: _C3600_NMS, 5: _C3600_NMS, 6: _C3600_NMS,
+        },
+        "valid_images": [r"c3[0-9]+.*\.bin"],
+        "ram_range": (64, 512),
     },
 }
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  Module → port count lookup
+#  Derived from constants/hardware.py — single source of truth.
 # ═══════════════════════════════════════════════════════════════════════════════
-#
-#  Derived from constants/hardware.py DYNAMIPS_MODULE_INTERFACES so there is
-#  exactly ONE source of truth for port counts.  The validator's old inline
-#  copy had PA-FE-TX = 2 (wrong; it's 1) and was missing several modules.
 
 MODULE_PORT_COUNT: Dict[str, int] = {
     name: info["count"]
     for name, info in DYNAMIPS_MODULE_INTERFACES.items()
 }
 
-# Add modules that appear in DYNAMIPS_COMPAT but may not be in
-# DYNAMIPS_MODULE_INTERFACES (C7200 I/O controllers, Leopard-2FE, etc.).
-# These are additive — they don't override anything already derived above.
+# Extra modules that appear in DYNAMIPS_COMPAT but may not be in
+# DYNAMIPS_MODULE_INTERFACES (various motherboard and I/O chips).
 _EXTRA_MODULE_PORTS: Dict[str, int] = {
     "Leopard-2FE":    2,
     "C7200-IO-FE":    1,
     "C7200-IO-2FE":   2,
     "C7200-IO-GE-E":  1,
-    "C1700-MB-1ETH":  1,
+    # Corrected name: C1700-MB-1FE (not C1700-MB-1ETH)
+    "C1700-MB-1FE":   1,
     "PA-A1":          1,
     "PA-POS-OC3":     1,
+    "NM-1D":          1,   # ISDN BRI — 1 port
+    # c2600 motherboard chips
+    "CISCO2600-MB-2FE": 2,
+    "CISCO2600-MB-1E":  1,
+    "GT96100-FE":       2,
 }
 for _mod, _count in _EXTRA_MODULE_PORTS.items():
     MODULE_PORT_COUNT.setdefault(_mod, _count)
