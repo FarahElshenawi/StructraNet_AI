@@ -2,30 +2,21 @@
 hw_config.py — Hardware Configuration Injector for Structranet AI
 
 Dynamically expands port/adapter counts for GNS3 nodes based on
-the number of links the AI topology assigns to each node, preventing
-the dreaded "No available port" deployment error.
+the number of links the AI topology assigns to each node.
+
+V3.1 corrections:
+  - C1700-MB-1ETH → C1700-MB-1FE (correct GNS3/Dynamips module name)
+  - c3640/c3620 first_configurable = 0 (no fixed slot 0 on these platforms;
+    all slots are user-configurable)
+  - Added c3600 platform alias so GNS3-exported topologies with
+    platform="c3600" are handled instead of falling to the fallback
+  - serial_nm selection: NM-4T for all NM-based platforms (c3745, c3725,
+    c2691, c3660, c3640, c3620, c2600); PA-4T+ only for c7200
+  - DYNAMIPS_SERIAL_MODULE_INTERFACES now correctly contains only
+    Serial-prefix modules (PA-4T+, PA-8T, NM-4T, NM-1T)
 
 This module is the SINGLE SOURCE OF TRUTH for all hardware constants
-(port counts, module catalogues, interface name mappings) used across
-the pipeline.  Other modules (context_builder, port_assigner,
-topology_finalizer) import from here — never duplicate these values.
-
-Tier classification
-───────────────────
-  Tier 1 — Expandable via `properties` payload:
-    dynamips / iou           → slot-based modules  (PA-8E, NM-4E, PA-4T+, NM-4T, …)
-    qemu / docker / vbox     → `adapters` integer
-      / vmware
-    ethernet_switch / hub    → `ports_mapping` array
-
-  Tier 2 — Hard-locked to 1 port (cannot expand):
-    vpcs / traceng / nat     → constrain the LLM + Pydantic validator
-
-  Tier 3 — Different paradigm (mappings, not port counts):
-    frame_relay_switch       → `mappings` object
-    atm_switch               → `mappings` object
-
-Source: GNS3 server v2 source code (github.com/GNS3/gns3-server)
+used across the pipeline. Other modules import from here.
 """
 
 import logging
@@ -60,45 +51,35 @@ logger = logging.getLogger("structranet.hw_config")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  Constants — adapter limits, module mappings, built-in port counts
+#  Derived constants — exported for use by context_builder and port_assigner
 # ═══════════════════════════════════════════════════════════════════════════════
 
-# FIX (Bug 1): DYNAMIPS_SERIAL_MODULE_INTERFACES was imported by context_builder.py
-# but never defined here.  Added as an alias to DYNAMIPS_MODULE_INTERFACES filtered
-# to serial modules only — same data, explicit name that context_builder expects.
-#
-# Source: gns3-gui/settings.py + constants/hardware.py DYNAMIPS_MODULE_INTERFACES
-# Serial modules are those whose prefix is "Serial".
+# Serial module interfaces — subset of DYNAMIPS_MODULE_INTERFACES where
+# the interface prefix is "Serial". Used by context_builder for port naming.
 DYNAMIPS_SERIAL_MODULE_INTERFACES: Dict[str, Dict[str, Any]] = {
     name: info
     for name, info in DYNAMIPS_MODULE_INTERFACES.items()
     if info["prefix"] == "Serial"
 }
 
-# Convenience subset: serial module names only (used by _inject_dynamips_slots
-# to classify existing modules as serial vs Ethernet).
 DYNAMIPS_SERIAL_MODULE_NAMES: frozenset = frozenset(DYNAMIPS_SERIAL_MODULE_INTERFACES.keys())
 
-# ── Cross-catalogue module → ports_per_module lookup ─────────────────────────
-# Used by _inject_dynamips_slots to determine the actual port count of an
-# existing module when a slot is already occupied.  Combines both Ethernet
-# and serial catalogues so we never miscount ports from a pre-set slot.
+# Cross-catalogue module → ports_per_module lookup
 _MODULE_PORT_COUNT: Dict[str, int] = {}
 for _plat, _cfg in DYNAMIPS_SLOT_MODULES.items():
     _MODULE_PORT_COUNT[_cfg["module"]] = _cfg["ports_per_module"]
 for _plat, _cfg in DYNAMIPS_SERIAL_MODULES.items():
     _MODULE_PORT_COUNT[_cfg["module"]] = _cfg["ports_per_module"]
-# Add entries from DYNAMIPS_MODULE_INTERFACES for completeness
 for _mod, _info in DYNAMIPS_MODULE_INTERFACES.items():
     if _mod not in _MODULE_PORT_COUNT:
         _MODULE_PORT_COUNT[_mod] = _info["count"]
 
+
 # ═══════════════════════════════════════════════════════════════════════════════
-#  Helper: count how many links attach to each node
+#  Helper: link statistics per node
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _compute_link_stats(links: List[Dict[str, Any]]) -> tuple:
-    """Single pass: link count, max port number, max adapter per node."""
     counts: Dict[str, int] = {}
     max_ports: Dict[str, int] = {}
     max_adapters: Dict[str, int] = {}
@@ -130,7 +111,9 @@ def _max_adapter_per_node(links: List[Dict[str, Any]]) -> Dict[str, int]:
     return max_adapters
 
 
-def _count_links_per_node_by_type(links: List[Dict[str, Any]]) -> Dict[str, Dict[str, int]]:
+def _count_links_per_node_by_type(
+    links: List[Dict[str, Any]]
+) -> Dict[str, Dict[str, int]]:
     counts: Dict[str, Dict[str, int]] = {}
     for link in links:
         link_type = link.get("link_type", "ethernet")
@@ -143,7 +126,9 @@ def _count_links_per_node_by_type(links: List[Dict[str, Any]]) -> Dict[str, Dict
     return counts
 
 
-def _classify_adapter_link_types(links: List[Dict[str, Any]]) -> Dict[str, Dict[int, str]]:
+def _classify_adapter_link_types(
+    links: List[Dict[str, Any]]
+) -> Dict[str, Dict[int, str]]:
     result: Dict[str, Dict[int, str]] = {}
     for link in links:
         link_type = link.get("link_type", "ethernet")
@@ -165,7 +150,7 @@ def _classify_adapter_link_types(links: List[Dict[str, Any]]) -> Dict[str, Dict[
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  Tier 1a — Slot-based expansion  (dynamips, iou)
+#  Tier 1a — Slot-based expansion (dynamips, iou)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _inject_slots(
@@ -194,11 +179,9 @@ def _identify_dynamips_platform(
     platform = properties.get("platform")
     if platform:
         return str(platform).lower()
-
     template_name = node.get("template_name", "")
     if template_name:
         return str(template_name).lower()
-
     logger.debug(
         "Node %s: could not determine dynamips platform, defaulting to c7200",
         node.get("node_id"),
@@ -212,7 +195,13 @@ def _inject_dynamips_slots(
     adapter_link_types: Optional[Dict[int, str]] = None,
     link_counts_by_type: Optional[Dict[str, int]] = None,
 ) -> None:
-    """Expand Dynamips slots based on the platform's module catalogue."""
+    """Expand Dynamips slots based on the platform's module catalogue.
+
+    Corrections vs previous version:
+    - c3640/c3620: first_configurable = 0 (no fixed motherboard slot)
+    - c3600 alias handled (same as c3660 spec)
+    - serial_nm: uses NM-4T for all NM-based platforms; PA-4T+ for c7200 only
+    """
     platform = _identify_dynamips_platform(node, properties)
     eth_config = DYNAMIPS_SLOT_MODULES.get(platform, DYNAMIPS_FALLBACK)
     ser_config = DYNAMIPS_SERIAL_MODULES.get(platform, DYNAMIPS_SERIAL_FALLBACK)
@@ -222,8 +211,16 @@ def _inject_dynamips_slots(
 
     first_slot = eth_config["first_configurable"]
     max_slots = eth_config["max_slots"]
-    last_slot = first_slot + max_slots - 1
 
+    # c1700 has no NM slots — nothing to inject
+    if max_slots == 0:
+        logger.debug(
+            "Node %s (%s): no NM slots available, skipping slot injection",
+            node.get("node_id"), platform,
+        )
+        return
+
+    last_slot = first_slot + max_slots - 1
     last_required_slot = min(min_adapter_slots, last_slot)
 
     alt = adapter_link_types or {}
@@ -250,7 +247,8 @@ def _inject_dynamips_slots(
     slot_idx = first_slot
 
     while slot_idx <= last_slot and (
-        eth_covered < eth_remaining or ser_covered < ser_remaining
+        eth_covered < eth_remaining
+        or ser_covered < ser_remaining
         or slot_idx <= last_required_slot
     ):
         slot_key = f"slot{slot_idx}"
@@ -319,7 +317,6 @@ def _inject_iou_slots(
     required_ports: int, min_adapter_slots: int = 0,
     link_counts_by_type: Optional[Dict[str, int]] = None,
 ) -> None:
-    """Expand IOU adapter counts based on link requirements."""
     lt_counts = link_counts_by_type or {}
     eth_required = lt_counts.get("ethernet", required_ports)
     ser_required = lt_counts.get("serial", 0)
@@ -361,7 +358,7 @@ def _inject_iou_slots(
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  Tier 1b — Adapter count expansion  (qemu, docker, virtualbox, vmware)
+#  Tier 1b — Adapter count expansion (qemu, docker, virtualbox, vmware)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _inject_adapter_count(node: Dict[str, Any], required_ports: int) -> None:
@@ -394,7 +391,7 @@ def _inject_adapter_count(node: Dict[str, Any], required_ports: int) -> None:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  Tier 1c — Ports mapping expansion  (ethernet_switch, ethernet_hub)
+#  Tier 1c — Ports mapping expansion (ethernet_switch, ethernet_hub)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _make_switch_port(index: int) -> Dict[str, Any]:
@@ -516,7 +513,6 @@ def inject_hardware_config(topology_dict: Dict[str, Any]) -> Dict[str, Any]:
                     "Node %s (%s): %d links requested but %s is "
                     "hard-locked to %d port(s) — deployment WILL fail.",
                     node_id, node_type, required, node_type, max_ports,
-                    node_type,
                 )
 
         elif node_type in MAPPING_BASED_TYPES:

@@ -4,11 +4,18 @@ Structranet AI — Topology Schema
 Pydantic models defining the contract between the AI agent and the
 port_assigner / hw_config / config_agent pipeline.
 
+V3.2 changelog:
+  - _DYNAMIPS_MAX_PORTS is now DERIVED from hw_config / constants/hardware.py
+    (DYNAMIPS_BUILTIN_PORTS + ports_per_module * max_slots) instead of being
+    a hardcoded ClassVar. This eliminates the drift between schema.py and
+    the hardware constants that caused incorrect validation limits.
+  - Added c3600 alias to _DYNAMIPS_MAX_PORTS (GNS3 uses platform="c3600"
+    for all c36xx chassis).
+  - Updated _DYNAMIPS_ADAPTER0_MAX_ETH_PORT to include c3600 alias.
+
 V3.1 changelog:
   - FIX (Bug 6): no_duplicate_connections now keys on (frozenset({a,b}), link_type)
-    instead of frozenset({a,b}) alone.  This allows one ethernet AND one serial
-    link between the same router pair, which is a valid WAN design pattern.
-    Source: GNS3 has no schema restriction on parallel links of different types.
+    instead of frozenset({a,b}) alone.
 """
 
 from pydantic import BaseModel, Field, model_validator
@@ -19,7 +26,40 @@ _schema_logger = logging.getLogger("structranet.schema")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  Step-1 LLM output models  (no port numbers — just nodes + connections)
+#  Derived hardware limits (single source of truth)
+# ═══════════════════════════════════════════════════════════════════════════════
+# Import here to derive limits — done at module level so ClassVar assignments
+# below can reference the computed values without circular import issues.
+
+from constants.hardware import (
+    DYNAMIPS_BUILTIN_PORTS,
+    DYNAMIPS_BUILTIN_DEFAULT,
+    DYNAMIPS_SLOT_MODULES,
+)
+
+
+def _compute_dynamips_max_ports() -> Dict[str, int]:
+    """Derive max port count per platform from the hardware constants.
+
+    Formula: builtin_ports + (ports_per_module * max_slots)
+
+    This is the theoretical maximum; AI limits in constants/ai.py are more
+    conservative (PCI bus, practical topology limits).
+    """
+    result: Dict[str, int] = {}
+    for platform, cfg in DYNAMIPS_SLOT_MODULES.items():
+        builtin = DYNAMIPS_BUILTIN_PORTS.get(platform, DYNAMIPS_BUILTIN_DEFAULT)
+        expansion = cfg["ports_per_module"] * cfg["max_slots"]
+        result[platform] = builtin + expansion
+    return result
+
+
+# Computed once at import time
+_DYNAMIPS_MAX_PORTS_COMPUTED: Dict[str, int] = _compute_dynamips_max_ports()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Step-1 LLM output models (no port numbers — just nodes + connections)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class Connection(BaseModel):
@@ -80,10 +120,6 @@ class TopologyRequest(BaseModel):
 
     @model_validator(mode="after")
     def no_duplicate_connections(self):
-        # FIX (Bug 6): Key on (frozenset({a,b}), link_type) so that one ethernet
-        # AND one serial link between the same router pair are both accepted.
-        # This is a valid WAN design pattern (e.g. ethernet for LAN, serial for WAN).
-        # Previously keyed on frozenset({a,b}) alone, which wrongly rejected it.
         seen: set[tuple] = set()
         for c in self.connections:
             key = (frozenset([c.from_node, c.to_node]), c.link_type)
@@ -148,7 +184,7 @@ class TopologyRequest(BaseModel):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  Final topology models  (port numbers assigned by port_assigner.py)
+#  Final topology models (port numbers assigned by port_assigner.py)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class LinkNode(BaseModel):
@@ -187,23 +223,36 @@ class Topology(BaseModel):
     SINGLE_PORT_TYPES: ClassVar[dict[str, int]] = {
         "vpcs": 1, "traceng": 1, "nat": 1,
     }
+
+    # Adapter 0 max port number per Dynamips platform.
+    # -1 means no built-in Ethernet on adapter 0 at all.
     _DYNAMIPS_ADAPTER0_MAX_ETH_PORT: ClassVar[dict[str, int]] = {
-        "c7200": 0, "c3745": 1, "c3725": 1, "c3660": 1,
-        "c3640": -1, "c3620": -1, "c2691": 1, "c2600": 0, "c1700": 0,
+        "c7200": 0,    # C7200-IO-FE = 1 port → port 0 only
+        "c3745": 1,    # GT96100-FE = 2 ports → port 0 and 1
+        "c3725": 1,    # GT96100-FE = 2 ports
+        "c3660": 1,    # Leopard-2FE = 2 ports
+        "c3640": -1,   # no built-in → no port 0 available on adapter 0
+        "c3620": -1,
+        "c2691": 1,    # GT96100-FE = 2 ports
+        "c2600": 0,    # 1 built-in FE → port 0 only
+        "c1700": 0,    # C1700-MB-1FE = 1 port → port 0 only
+        "c3600": 1,    # alias — c3660 spec (Leopard-2FE = 2 ports)
     }
     _DYNAMIPS_ADAPTER0_DEFAULT_MAX: ClassVar[int] = 0
+
     _SINGLE_PORT_PER_ADAPTER_TYPES: ClassVar[frozenset] = frozenset([
         "qemu", "docker", "virtualbox", "vmware",
     ])
+
     _MAX_EXPANDABLE_PORTS: ClassVar[dict[str, int]] = {
         "iou": 16, "qemu": 8, "docker": 8,
         "virtualbox": 8, "vmware": 10,
         "ethernet_switch": 128, "ethernet_hub": 128,
     }
-    _DYNAMIPS_MAX_PORTS: ClassVar[dict[str, int]] = {
-        "c7200": 3, "c3745": 6, "c3725": 6, "c3660": 5,
-        "c3640": 4, "c3620": 4, "c2691": 6, "c2600": 2, "c1700": 2,
-    }
+
+    # Dynamips max ports derived from hardware constants at class definition
+    # time — no more hardcoded dict that can drift from the real constants.
+    _DYNAMIPS_MAX_PORTS: ClassVar[dict[str, int]] = _DYNAMIPS_MAX_PORTS_COMPUTED
 
     nodes: List[Node] = Field(..., min_length=1)
     links: List[Link] = Field(default_factory=list)
@@ -233,8 +282,6 @@ class Topology(BaseModel):
 
     @model_validator(mode="after")
     def no_duplicate_links(self):
-        # FIX (Bug 6): Allow one ethernet + one serial link between the same pair.
-        # Key on (frozenset({a,b}), link_type) to match the TopologyRequest fix.
         seen_pairs: set[tuple] = set()
         for link in self.links:
             key = (
@@ -429,7 +476,7 @@ class GNS3Project(BaseModel):
     topology: Topology
 
 
-# ── Soft validation helpers ────────────────────────────────────────────────────
+# ── Soft validation helpers ───────────────────────────────────────────────────
 
 def validate_topology_request(data: dict) -> list[str]:
     errors: list[str] = []

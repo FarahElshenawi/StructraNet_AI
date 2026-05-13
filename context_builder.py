@@ -4,7 +4,7 @@ context_builder.py — Phase 2 Context Builder for Structranet AI
 Transforms a Phase 1 topology dict into a human-readable Configuration Brief
 that the LLM uses to generate software configurations (IPs, routing, startup).
 
-V3.0 changes:
+V3.1 changes:
   - REMOVED patch_switch_ports_mapping from this module.
     It now lives in topology_finalizer.py and runs during hardware injection,
     not as a side effect of reading the topology for a brief.
@@ -12,6 +12,14 @@ V3.0 changes:
     The caller is responsible for passing a topology that has already been
     patched by topology_finalizer.apply_switch_port_patches().
   - All segment/VLAN logic is preserved.
+
+V3.2 changes:
+  - REMOVED duplicate DYNAMIPS_MODULE_INTERFACES table — now imported from
+    constants/hardware.py (single source of truth).
+  - REMOVED duplicate DYNAMIPS_BUILTIN_INTERFACES table — now imported from
+    constants/hardware.py as DYNAMIPS_BUILTIN_INTERFACE_DETAILS.
+  - C1700-MB-1ETH → C1700-MB-1FE (correct GNS3/Dynamips module name).
+  - Added c3600 platform alias to interface resolution.
 """
 
 import json
@@ -21,46 +29,36 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, FrozenSet, List, Optional, Set, Tuple
 
-from constants.hardware import NO_CONFIG_TYPES
-from hw_config import DYNAMIPS_BUILTIN_PORTS as _HW_DYNAMIPS_BUILTIN_PORTS
-from hw_config import DYNAMIPS_SERIAL_MODULE_INTERFACES as _HW_SERIAL_MOD_INTERFACES
-from hw_config import IOU_PORTS_PER_ADAPTER as _HW_IOU_PORTS_PER_ADAPTER
+from constants.hardware import (
+    NO_CONFIG_TYPES,
+    DYNAMIPS_BUILTIN_INTERFACE_DETAILS as _HW_BUILTIN_IFACE,
+    DYNAMIPS_MODULE_INTERFACES as _HW_MODULE_INTERFACES,
+    DYNAMIPS_BUILTIN_PORTS as _HW_DYNAMIPS_BUILTIN_PORTS,
+    IOU_PORTS_PER_ADAPTER as _HW_IOU_PORTS_PER_ADAPTER,
+)
+from hw_config import (
+    DYNAMIPS_SERIAL_MODULE_INTERFACES as _HW_SERIAL_MOD_INTERFACES,
+)
 
 logger = logging.getLogger("structranet.context_builder")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  Constants
+#  Module / interface tables
+#  Previously duplicated inline — now imported from constants/hardware.py.
+#  Local aliases kept so the rest of this file needs no other changes.
 # ═══════════════════════════════════════════════════════════════════════════════
 
-DYNAMIPS_MODULE_INTERFACES: Dict[str, Dict[str, Any]] = {
-    "PA-8E":      {"prefix": "Ethernet",        "count": 8},
-    "PA-4E":      {"prefix": "Ethernet",        "count": 4},
-    "PA-FE-TX":   {"prefix": "FastEthernet",    "count": 1},
-    "PA-2FE-TX":  {"prefix": "FastEthernet",    "count": 2},
-    "PA-GE":      {"prefix": "GigabitEthernet", "count": 1},
-    "NM-4E":      {"prefix": "Ethernet",        "count": 4},
-    "NM-1E":      {"prefix": "Ethernet",        "count": 1},
-    "NM-1FE-TX":  {"prefix": "FastEthernet",    "count": 1},
-    "NM-16ESW":   {"prefix": "FastEthernet",    "count": 16},
-    "GT96100-FE": {"prefix": "FastEthernet",    "count": 2},
-    "PA-4T+":     {"prefix": "Serial",          "count": 4},
-    "PA-8T":      {"prefix": "Serial",          "count": 8},
-    "NM-4T":      {"prefix": "Serial",          "count": 4},
-    "NM-1T":      {"prefix": "Serial",          "count": 1},
-}
+# Full module → (prefix, count) map (Ethernet + Serial)
+DYNAMIPS_MODULE_INTERFACES: Dict[str, Dict[str, Any]] = _HW_MODULE_INTERFACES
 
-DYNAMIPS_BUILTIN_INTERFACES: Dict[str, Dict[str, Any]] = {
-    "c7200":  {"prefix": "FastEthernet", "count": 1},
-    "c3745":  {"prefix": "FastEthernet", "count": 2},
-    "c3725":  {"prefix": "FastEthernet", "count": 2},
-    "c3660":  {"prefix": "FastEthernet", "count": 2},
-    "c3640":  {"prefix": None,           "count": 0},
-    "c3620":  {"prefix": None,           "count": 0},
-    "c2691":  {"prefix": "FastEthernet", "count": 2},
-    "c2600":  {"prefix": "FastEthernet", "count": 1},
-    "c1700":  {"prefix": "FastEthernet", "count": 1},
-}
+# Built-in (adapter 0) interface details per platform
+DYNAMIPS_BUILTIN_INTERFACES: Dict[str, Dict[str, Any]] = _HW_BUILTIN_IFACE
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Constants
+# ═══════════════════════════════════════════════════════════════════════════════
 
 L2_CONCENTRATOR_TYPES: FrozenSet[str] = frozenset(["ethernet_switch", "ethernet_hub"])
 L3_ROUTER_TYPES: FrozenSet[str] = frozenset([
@@ -120,14 +118,13 @@ def _identify_platform(node: dict) -> str:
     return str(node.get("template_name", "")).lower()
 
 
-def resolve_port_name(node: dict, adapter_number: int, port_number: int, link_type: str = "ethernet") -> str:
+def resolve_port_name(
+    node: dict, adapter_number: int, port_number: int, link_type: str = "ethernet"
+) -> str:
     node_type = node.get("node_type", "")
     if node_type == "dynamips":
         return _resolve_dynamips_port(node, adapter_number, port_number)
     if node_type == "iou":
-        # IOU uses flat adapter numbering: Eth adapters 0..N-1, then Ser N..
-        # Interface name is determined by which range the adapter falls in.
-        # eth_adapters is set by hw_config.inject_hardware_config().
         props = node.get("properties", {})
         eth_adapters = int(props.get("ethernet_adapters", 2))
         if adapter_number < eth_adapters:
@@ -153,6 +150,7 @@ def _resolve_dynamips_port(node: dict, adapter_number: int, port_number: int) ->
     props = node.get("properties", {})
 
     if adapter_number == 0:
+        # Use the imported builtin interface details — single source of truth.
         builtin = DYNAMIPS_BUILTIN_INTERFACES.get(
             platform, {"prefix": "FastEthernet", "count": 1}
         )
@@ -250,7 +248,9 @@ def _build_node_map(topology: dict) -> Dict[str, dict]:
     return {n["node_id"]: n for n in topology.get("nodes", [])}
 
 
-def _resolve_endpoint(ep: dict, node_map: Dict[str, dict], link_type: str = "ethernet") -> ResolvedPort:
+def _resolve_endpoint(
+    ep: dict, node_map: Dict[str, dict], link_type: str = "ethernet"
+) -> ResolvedPort:
     nid = ep.get("node_id", "")
     node = node_map.get(nid, {})
     adapter = ep.get("adapter_number", 0)
@@ -354,7 +354,6 @@ def build_segments(topology: dict, node_map: Dict[str, dict]) -> List[Segment]:
         if a_type in L2_CONCENTRATOR_TYPES and b_type in L2_CONCENTRATOR_TYPES:
             union(a_id, b_id)
 
-    # Identify access switches with a core parent
     access_sw_has_core_parent: Set[str] = set()
     for link in links:
         eps = link.get("nodes", [])
@@ -371,7 +370,6 @@ def build_segments(topology: dict, node_map: Dict[str, dict]) -> List[Segment]:
     access_switch_vlan: Dict[str, int] = {}
     access_switch_name_map: Dict[str, str] = {}
 
-    # Pass 1: register explicit vlan properties
     for node in topology.get("nodes", []):
         nid = node.get("node_id", "")
         if nid not in access_switch_ids or nid not in access_sw_has_core_parent:
@@ -382,7 +380,6 @@ def build_segments(topology: dict, node_map: Dict[str, dict]) -> List[Segment]:
             access_switch_vlan[nid] = vid
             used_vlans.add(vid)
 
-    # Pass 2: infer VLANs
     for node in topology.get("nodes", []):
         nid = node.get("node_id", "")
         if nid not in access_switch_ids:
@@ -400,14 +397,12 @@ def build_segments(topology: dict, node_map: Dict[str, dict]) -> List[Segment]:
         access_switch_vlan[nid] = vid
         used_vlans.add(vid)
 
-    # Router segment key lookup for access switches
     access_sw_router_key: Dict[str, str] = {}
     for sw_id in access_switch_ids:
         access_sw_router_key[sw_id] = _find_router_segment_key(
             sw_id, links, node_map, concentrator_ids, core_switch_ids, find
         )
 
-    # Assign segment keys
     link_segment_keys: List[str] = []
     link_access_sw: List[Optional[str]] = []
     link_link_types: List[str] = []
@@ -438,19 +433,31 @@ def build_segments(topology: dict, node_map: Dict[str, dict]) -> List[Segment]:
         if a_is_router and b_is_router:
             key = f"p2p:{a_id}:{eps[0].get('adapter_number',0)}:{eps[0].get('port_number',0)}"
         elif a_is_router and b_is_core:
-            resolved = resolve_port_name(node_map[a_id], eps[0].get("adapter_number", 0), eps[0].get("port_number", 0), link_type=link.get("link_type", "ethernet"))
+            resolved = resolve_port_name(
+                node_map[a_id], eps[0].get("adapter_number", 0),
+                eps[0].get("port_number", 0), link_type=link.get("link_type", "ethernet")
+            )
             key = f"trunk:{a_id}:{resolved}"
         elif b_is_router and a_is_core:
-            resolved = resolve_port_name(node_map[b_id], eps[1].get("adapter_number", 0), eps[1].get("port_number", 0), link_type=link.get("link_type", "ethernet"))
+            resolved = resolve_port_name(
+                node_map[b_id], eps[1].get("adapter_number", 0),
+                eps[1].get("port_number", 0), link_type=link.get("link_type", "ethernet")
+            )
             key = f"trunk:{b_id}:{resolved}"
         elif a_is_router:
-            resolved = resolve_port_name(node_map[a_id], eps[0].get("adapter_number", 0), eps[0].get("port_number", 0), link_type=link.get("link_type", "ethernet"))
+            resolved = resolve_port_name(
+                node_map[a_id], eps[0].get("adapter_number", 0),
+                eps[0].get("port_number", 0), link_type=link.get("link_type", "ethernet")
+            )
             vlan = access_switch_vlan.get(b_id, 0) if b_is_access else 0
             key = f"router:{a_id}:{resolved}:vlan:{vlan}"
             if b_is_access:
                 assigned_access_sw = b_id
         elif b_is_router:
-            resolved = resolve_port_name(node_map[b_id], eps[1].get("adapter_number", 0), eps[1].get("port_number", 0), link_type=link.get("link_type", "ethernet"))
+            resolved = resolve_port_name(
+                node_map[b_id], eps[1].get("adapter_number", 0),
+                eps[1].get("port_number", 0), link_type=link.get("link_type", "ethernet")
+            )
             vlan = access_switch_vlan.get(a_id, 0) if a_is_access else 0
             key = f"router:{b_id}:{resolved}:vlan:{vlan}"
             if a_is_access:
@@ -478,9 +485,13 @@ def build_segments(topology: dict, node_map: Dict[str, dict]) -> List[Segment]:
         elif a_is_conc and b_is_conc:
             key = f"switch_group:{find(a_id)}"
         elif a_is_conc:
-            key = _find_router_segment_key(a_id, links, node_map, concentrator_ids, core_switch_ids, find)
+            key = _find_router_segment_key(
+                a_id, links, node_map, concentrator_ids, core_switch_ids, find
+            )
         elif b_is_conc:
-            key = _find_router_segment_key(b_id, links, node_map, concentrator_ids, core_switch_ids, find)
+            key = _find_router_segment_key(
+                b_id, links, node_map, concentrator_ids, core_switch_ids, find
+            )
         else:
             key = f"p2p:{a_id}:{eps[0].get('adapter_number',0)}:{eps[0].get('port_number',0)}"
 
@@ -488,7 +499,6 @@ def build_segments(topology: dict, node_map: Dict[str, dict]) -> List[Segment]:
         link_access_sw.append(assigned_access_sw)
         link_link_types.append(link.get("link_type", "ethernet"))
 
-    # Group by key
     grouped: Dict[str, List[dict]] = {}
     grouped_access_sw: Dict[str, Optional[str]] = {}
     grouped_link_type: Dict[str, str] = {}
@@ -561,11 +571,19 @@ def _find_router_segment_key(
 
         if a_type in L3_ROUTER_TYPES and b_type in L2_CONCENTRATOR_TYPES:
             if find_func(b_id) == find_func(switch_id):
-                resolved = resolve_port_name(node_map[a_id], eps[0].get("adapter_number", 0), eps[0].get("port_number", 0), link_type=link.get("link_type", "ethernet"))
+                resolved = resolve_port_name(
+                    node_map[a_id], eps[0].get("adapter_number", 0),
+                    eps[0].get("port_number", 0),
+                    link_type=link.get("link_type", "ethernet")
+                )
                 return f"router:{a_id}:{resolved}"
         if b_type in L3_ROUTER_TYPES and a_type in L2_CONCENTRATOR_TYPES:
             if find_func(a_id) == find_func(switch_id):
-                resolved = resolve_port_name(node_map[b_id], eps[1].get("adapter_number", 0), eps[1].get("port_number", 0), link_type=link.get("link_type", "ethernet"))
+                resolved = resolve_port_name(
+                    node_map[b_id], eps[1].get("adapter_number", 0),
+                    eps[1].get("port_number", 0),
+                    link_type=link.get("link_type", "ethernet")
+                )
                 return f"router:{b_id}:{resolved}"
 
     return f"switch_group:{find_func(switch_id)}"
@@ -615,8 +633,10 @@ def _extract_trunk_router_iface(segments: List[Segment]) -> str:
     return ""
 
 
-def _detect_nat_role(nat_node_id: str, links: List[dict],
-                     node_map: Dict[str, dict], concentrator_ids: Set[str]) -> str:
+def _detect_nat_role(
+    nat_node_id: str, links: List[dict],
+    node_map: Dict[str, dict], concentrator_ids: Set[str]
+) -> str:
     for link in links:
         eps = link.get("nodes", [])
         if len(eps) < 2:
@@ -651,10 +671,18 @@ def _detect_router_nat_interfaces(
         b_type = node_map.get(b_id, {}).get("node_type", "")
 
         if a_type in L3_ROUTER_TYPES and b_id in nat_ids:
-            iface = resolve_port_name(node_map[a_id], eps[0].get("adapter_number", 0), eps[0].get("port_number", 0), link_type=link.get("link_type", "ethernet"))
+            iface = resolve_port_name(
+                node_map[a_id], eps[0].get("adapter_number", 0),
+                eps[0].get("port_number", 0),
+                link_type=link.get("link_type", "ethernet")
+            )
             router_ifaces.setdefault(a_id, {})[iface] = "outside"
         elif b_type in L3_ROUTER_TYPES and a_id in nat_ids:
-            iface = resolve_port_name(node_map[b_id], eps[1].get("adapter_number", 0), eps[1].get("port_number", 0), link_type=link.get("link_type", "ethernet"))
+            iface = resolve_port_name(
+                node_map[b_id], eps[1].get("adapter_number", 0),
+                eps[1].get("port_number", 0),
+                link_type=link.get("link_type", "ethernet")
+            )
             router_ifaces.setdefault(b_id, {})[iface] = "outside"
 
     for link in links:
@@ -666,7 +694,11 @@ def _detect_router_nat_interfaces(
         b_type = node_map.get(b_id, {}).get("node_type", "")
 
         if a_type in L3_ROUTER_TYPES and a_id in router_ifaces:
-            iface = resolve_port_name(node_map[a_id], eps[0].get("adapter_number", 0), eps[0].get("port_number", 0), link_type=link.get("link_type", "ethernet"))
+            iface = resolve_port_name(
+                node_map[a_id], eps[0].get("adapter_number", 0),
+                eps[0].get("port_number", 0),
+                link_type=link.get("link_type", "ethernet")
+            )
             is_inside = (
                 b_type in L2_CONCENTRATOR_TYPES or
                 (b_type in L3_ROUTER_TYPES and link.get("link_type") == "serial")
@@ -674,7 +706,11 @@ def _detect_router_nat_interfaces(
             if iface not in router_ifaces[a_id] and is_inside:
                 router_ifaces[a_id][iface] = "inside"
         elif b_type in L3_ROUTER_TYPES and b_id in router_ifaces:
-            iface = resolve_port_name(node_map[b_id], eps[1].get("adapter_number", 0), eps[1].get("port_number", 0), link_type=link.get("link_type", "ethernet"))
+            iface = resolve_port_name(
+                node_map[b_id], eps[1].get("adapter_number", 0),
+                eps[1].get("port_number", 0),
+                link_type=link.get("link_type", "ethernet")
+            )
             is_inside = (
                 a_type in L2_CONCENTRATOR_TYPES or
                 (a_type in L3_ROUTER_TYPES and link.get("link_type") == "serial")
@@ -726,40 +762,61 @@ def generate_brief(topology: dict) -> str:
         if seg.seg_type == "trunk":
             lines.append(f"  Segment {seg.segment_id} (802.1Q trunk — NOT a routed segment):")
             for ep_a, ep_b in seg.link_pairs:
-                lines.append(f"    {ep_a.node_id:6s} {ep_a.canonical_name:20s}  <->  {ep_b.node_id} {ep_b.canonical_name}")
+                lines.append(
+                    f"    {ep_a.node_id:6s} {ep_a.canonical_name:20s}"
+                    f"  <->  {ep_b.node_id} {ep_b.canonical_name}"
+                )
             lines.append("    → Configure 802.1Q sub-interfaces on the router side, one per VLAN.")
         elif seg.seg_type == "multi-access":
             vlan_label = f"VLAN {seg.vlan_id}" if seg.vlan_id else "untagged"
             sw_label = f", access-sw: {seg.access_switch_name}" if seg.access_switch_name else ""
-            lines.append(f"  Segment {seg.segment_id} (multi-access, {vlan_label}{sw_label}, {len(hosts)} host(s)):")
+            lines.append(
+                f"  Segment {seg.segment_id} "
+                f"(multi-access, {vlan_label}{sw_label}, {len(hosts)} host(s)):"
+            )
             if seg.vlan_id:
                 parent_iface = trunk_router_iface or _find_router_iface_in_segment(seg)
                 if parent_iface:
-                    lines.append(f"    → Router sub-interface: {parent_iface}.{seg.vlan_id} (encapsulation dot1Q {seg.vlan_id})")
+                    lines.append(
+                        f"    → Router sub-interface: {parent_iface}.{seg.vlan_id} "
+                        f"(encapsulation dot1Q {seg.vlan_id})"
+                    )
                 else:
-                    lines.append(f"    → Router sub-interface: <parent-iface>.{seg.vlan_id} (encapsulation dot1Q {seg.vlan_id})")
+                    lines.append(
+                        f"    → Router sub-interface: <parent-iface>.{seg.vlan_id} "
+                        f"(encapsulation dot1Q {seg.vlan_id})"
+                    )
             for ep_a, ep_b in seg.link_pairs:
                 if ep_a.node_type in L2_CONCENTRATOR_TYPES:
-                    lines.append(f"    {ep_b.node_id:6s} {ep_b.canonical_name:20s}  <->  {ep_a.node_id} {ep_a.canonical_name}")
+                    lines.append(
+                        f"    {ep_b.node_id:6s} {ep_b.canonical_name:20s}"
+                        f"  <->  {ep_a.node_id} {ep_a.canonical_name}"
+                    )
                 else:
-                    lines.append(f"    {ep_a.node_id:6s} {ep_a.canonical_name:20s}  <->  {ep_b.node_id} {ep_b.canonical_name}")
+                    lines.append(
+                        f"    {ep_a.node_id:6s} {ep_a.canonical_name:20s}"
+                        f"  <->  {ep_b.node_id} {ep_b.canonical_name}"
+                    )
         else:
             lines.append(f"  Segment {seg.segment_id} (point-to-point):")
             for ep_a, ep_b in seg.link_pairs:
-                lines.append(f"    {ep_a.node_id:6s} {ep_a.canonical_name:20s}  <->  {ep_b.node_id:6s} {ep_b.canonical_name}")
+                lines.append(
+                    f"    {ep_a.node_id:6s} {ep_a.canonical_name:20s}"
+                    f"  <->  {ep_b.node_id:6s} {ep_b.canonical_name}"
+                )
         lines.append("")
 
-    # NAT section
     nat_nodes = [n for n in nodes if n.get("node_type") == "nat"]
     if nat_nodes:
         lines.append("NAT GATEWAYS:")
         for nat_node in nat_nodes:
             nat_id = nat_node.get("node_id", "?")
             role = _detect_nat_role(nat_id, links, node_map, concentrator_ids)
-            lines.append(f"  {nat_node.get('name', nat_id)} ({nat_id}): role={role or 'unknown'}")
+            lines.append(
+                f"  {nat_node.get('name', nat_id)} ({nat_id}): role={role or 'unknown'}"
+            )
         lines.append("")
 
-    # Router NAT interface assignments
     router_nat_ifaces = _detect_router_nat_interfaces(nodes, links, node_map, concentrator_ids)
     if router_nat_ifaces:
         lines.append("ROUTER NAT INTERFACE ASSIGNMENTS:")
@@ -770,7 +827,6 @@ def generate_brief(topology: dict) -> str:
                 lines.append(f"    {iface_name}: ip nat {direction}")
         lines.append("")
 
-    # WAN p2p section
     p2p_segments = [s for s in segments if s.seg_type == "point-to-point"]
     if p2p_segments:
         lines.append("WAN POINT-TO-POINT LINKS:")
@@ -778,13 +834,15 @@ def generate_brief(topology: dict) -> str:
             is_serial = seg.link_type == "serial"
             lines.append(f"  Segment {seg.segment_id} ({'SERIAL' if is_serial else 'Ethernet'}):")
             for ep_a, ep_b in seg.link_pairs:
-                lines.append(f"    {ep_a.node_id:6s} {ep_a.canonical_name:20s}  <->  {ep_b.node_id:6s} {ep_b.canonical_name}")
+                lines.append(
+                    f"    {ep_a.node_id:6s} {ep_a.canonical_name:20s}"
+                    f"  <->  {ep_b.node_id:6s} {ep_b.canonical_name}"
+                )
             lines.append(f"    → Use /30 subnets (e.g. 10.255.{i}.0/30)")
             if is_serial:
                 lines.append("    → SERIAL: encapsulation hdlc, clock rate 64000 on DCE side")
         lines.append("")
 
-    # Config key mapping
     lines.append("CONFIG KEY MAPPING (use these exact property names):")
     present_types = {n.get("node_type") for n in nodes}
     for ntype in sorted(present_types):
@@ -795,26 +853,32 @@ def generate_brief(topology: dict) -> str:
             lines.append(f"  {ntype} -> No config needed")
     lines.append("")
 
-    # Architectural advice
     lines.append("ARCHITECTURAL ADVICE:")
     vlan_segments = [s for s in segments if s.vlan_id > 0]
     flat_segments = [s for s in segments if s.seg_type == "multi-access" and s.vlan_id == 0]
 
     if vlan_segments:
         vlan_sw_names = [s.access_switch_name for s in vlan_segments if s.access_switch_name]
-        lines.append(f"  This topology has {len(vlan_segments)} VLAN segment(s): [{', '.join(vlan_sw_names)}].")
-        lines.append("  You MUST implement Router-on-a-Stick (802.1Q sub-interfaces) for these segments.")
+        lines.append(
+            f"  This topology has {len(vlan_segments)} VLAN segment(s): "
+            f"[{', '.join(vlan_sw_names)}]."
+        )
+        lines.append(
+            "  You MUST implement Router-on-a-Stick (802.1Q sub-interfaces) for these segments."
+        )
         if flat_segments:
             flat_sw_names = [s.access_switch_name for s in flat_segments if s.access_switch_name]
-            lines.append(f"  ALSO {len(flat_segments)} FLAT/untagged segment(s): [{', '.join(flat_sw_names)}]. Use plain IP on physical interface.")
+            lines.append(
+                f"  ALSO {len(flat_segments)} FLAT/untagged segment(s): "
+                f"[{', '.join(flat_sw_names)}]. Use plain IP on physical interface."
+            )
     elif flat_segments:
-        lines.append(f"  This is a FLAT network. Use plain IP addresses on physical interfaces.")
+        lines.append("  This is a FLAT network. Use plain IP addresses on physical interfaces.")
         lines.append("  DO NOT use 802.1Q sub-interfaces or dot1Q encapsulation.")
     else:
         lines.append("  No access switches. Assign one subnet per segment.")
     lines.append("")
 
-    # Task
     lines.append("TASK:")
     lines.append("  1. Assign one unique subnet per segment (no overlaps).")
     lines.append("  2. /24 for multi-access, /30 for point-to-point.")
@@ -841,14 +905,7 @@ def build_configuration_brief(topology: dict) -> str:
 
     IMPORTANT: The topology should already have ports_mapping patched by
     topology_finalizer.apply_switch_port_patches() before calling this.
-    This function is now READ-ONLY — it does not mutate the topology.
-
-    Args:
-        topology: The full project dict ({"name": ..., "topology": {...}})
-                  or bare topology dict.
-
-    Returns:
-        The Configuration Brief string.
+    This function is READ-ONLY — it does not mutate the topology.
     """
     topo = topology.get("topology", topology)
     brief = generate_brief(topo)
