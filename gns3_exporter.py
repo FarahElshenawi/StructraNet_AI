@@ -19,8 +19,8 @@ V4.3 changes vs V4.2
   • RAM defaults corrected:
       c3725: 256 → 128 MB  (GNS3 default)
       c3660: 256 → 192 MB  (GNS3 default for c3600 platform)
-      c3640: 256 → 128 MB
-      c3620: 256 → 128 MB
+      c3640: 256 → 192 MB  (GNS3 uses c3600=192 for all chassis)
+      c3620: 256 → 192 MB  (GNS3 uses c3600=192 for all chassis)
       c2691: 256 → 192 MB  (GNS3 default)
       c2600: 128 → 160 MB  (GNS3 default)
       c1700: 128 → 160 MB  (GNS3 default)
@@ -60,6 +60,14 @@ from constants.gns3 import (
     SCENE_HEIGHT,
     SCENE_WIDTH,
     SYMBOL,
+)
+from constants.hardware import (
+    DYNAMIPS_BUILTIN_INTERFACE_DETAILS,
+    DYNAMIPS_MODULE_INTERFACES,
+    DYNAMIPS_RAM_DEFAULTS,
+    DYNAMIPS_SLOT0_DEFAULTS,
+    DYNAMIPS_SLOT_MODULES,
+    DYNAMIPS_FALLBACK,
 )
 from constants.validation import DYNAMIPS_COMPAT
 
@@ -108,111 +116,15 @@ _BUILTIN_TYPES = frozenset([
 # ═══════════════════════════════════════════════════════════════════════════════
 #  Dynamips platform tables
 #
-#  All corrections sourced from gns3-gui/settings.py ADAPTER_MATRIX:
-#
-#  C3700_NMS = ("NM-1FE-TX", "NM-4T", "NM-16ESW")
-#    → c3745 / c3725 / c2691 default_nm must be NM-1FE-TX, NOT NM-4E
-#
-#  C3600_NMS = ("NM-1FE-TX", "NM-1E", "NM-4E", "NM-1D", "NM-4T", "NM-16ESW")
-#    → c3660 / c3640 / c3620 default_nm = NM-4E (correct, unchanged)
-#
-#  C1700: slot 0 = "C1700-MB-1FE" (corrected from "C1700-MB-1ETH")
-#
-#  RAM defaults from GNS3 PLATFORMS_DEFAULT_RAM:
-#    c1700=160, c2600=160, c2691=192, c3600=192, c3725=128, c3745=256, c7200=512
+#  GHOST HUNTING FIX: All local hardware dictionaries (_DYN_BUILTIN, _DYN_MODULE,
+#  _DYN_HW_DEFAULTS) have been DELETED. This module now imports the single source
+#  of truth from constants.hardware:
+#    - DYNAMIPS_BUILTIN_INTERFACE_DETAILS  (replaces _DYN_BUILTIN)
+#    - DYNAMIPS_MODULE_INTERFACES          (replaces _DYN_MODULE)
+#    - DYNAMIPS_SLOT_MODULES               (provides default_nm + max_slots)
+#    - DYNAMIPS_RAM_DEFAULTS               (provides RAM defaults)
+#    - DYNAMIPS_SLOT0_DEFAULTS             (provides slot 0 module defaults)
 # ═══════════════════════════════════════════════════════════════════════════════
-
-_DYN_BUILTIN: Dict[str, Dict[str, Any]] = {
-    "c7200": {"prefix": "FastEthernet",  "count": 1},
-    "c3745": {"prefix": "FastEthernet",  "count": 2},   # GT96100-FE
-    "c3725": {"prefix": "FastEthernet",  "count": 2},   # GT96100-FE
-    "c3660": {"prefix": "FastEthernet",  "count": 2},   # Leopard-2FE
-    "c3640": {"prefix": None,            "count": 0},   # no fixed slot 0
-    "c3620": {"prefix": None,            "count": 0},   # no fixed slot 0
-    "c2691": {"prefix": "FastEthernet",  "count": 2},   # GT96100-FE
-    "c2600": {"prefix": "FastEthernet",  "count": 1},
-    "c1700": {"prefix": "FastEthernet",  "count": 1},
-    # c3600 alias (GNS3 platform field for all c36xx chassis)
-    "c3600": {"prefix": "FastEthernet",  "count": 2},   # Leopard-2FE or GT96100-FE
-}
-
-# _DYN_MODULE: all module names that can appear in slotN properties.
-# Key correction: C1700-MB-1ETH → C1700-MB-1FE
-# Added: Leopard-2FE (was missing — needed for c3660 slot 0 interface naming)
-_DYN_MODULE: Dict[str, Dict[str, Any]] = {
-    # C7200 PA modules
-    "PA-8E":          {"prefix": "Ethernet",        "count": 8},
-    "PA-4E":          {"prefix": "Ethernet",        "count": 4},
-    "PA-FE-TX":       {"prefix": "FastEthernet",    "count": 1},
-    "PA-2FE-TX":      {"prefix": "FastEthernet",    "count": 2},
-    "PA-GE":          {"prefix": "GigabitEthernet", "count": 1},
-    # C3600/C3700 NM modules
-    "NM-4E":          {"prefix": "Ethernet",        "count": 4},
-    "NM-1E":          {"prefix": "Ethernet",        "count": 1},
-    "NM-1FE-TX":      {"prefix": "FastEthernet",    "count": 1},
-    "NM-16ESW":       {"prefix": "FastEthernet",    "count": 16},
-    # Motherboard chips
-    "GT96100-FE":     {"prefix": "FastEthernet",    "count": 2},
-    "Leopard-2FE":    {"prefix": "FastEthernet",    "count": 2},
-    # C7200 I/O controllers
-    "C7200-IO-FE":    {"prefix": "FastEthernet",    "count": 1},
-    "C7200-IO-2FE":   {"prefix": "FastEthernet",    "count": 2},
-    "C7200-IO-GE-E":  {"prefix": "GigabitEthernet", "count": 1},
-    # C1700 motherboard — CORRECTED: C1700-MB-1ETH → C1700-MB-1FE
-    "C1700-MB-1FE":   {"prefix": "FastEthernet",    "count": 1},
-    # Serial modules
-    "PA-4T+":         {"prefix": "Serial",          "count": 4},
-    "PA-8T":          {"prefix": "Serial",          "count": 8},
-    "NM-4T":          {"prefix": "Serial",          "count": 4},
-    "NM-1T":          {"prefix": "Serial",          "count": 1},
-}
-
-_DYN_HW_DEFAULTS: Dict[str, Dict[str, Any]] = {
-    # c7200: slot 0 = I/O controller, expansion PAs in slots 1-6
-    # RAM: 512 MB (GNS3 default)
-    "c7200": {"ram": 512,  "slot0": "C7200-IO-FE",  "default_nm": "PA-8E",    "max_slots": 6},
-
-    # c3745: slot 0 = GT96100-FE (fixed), 4 NM slots
-    # default_nm CORRECTED: NM-4E → NM-1FE-TX (NM-4E is C3600-only)
-    # RAM: 256 MB (GNS3 default)
-    "c3745": {"ram": 256,  "slot0": "GT96100-FE",   "default_nm": "NM-1FE-TX","max_slots": 4},
-
-    # c3725: slot 0 = GT96100-FE (fixed), 2 NM slots
-    # default_nm CORRECTED: NM-4E → NM-1FE-TX
-    # RAM CORRECTED: 256 → 128 MB (GNS3 default)
-    "c3725": {"ram": 128,  "slot0": "GT96100-FE",   "default_nm": "NM-1FE-TX","max_slots": 2},
-
-    # c3660: slot 0 = Leopard-2FE (fixed), 6 NM slots
-    # default_nm correct: NM-4E is valid C3600_NMS
-    # RAM CORRECTED: 256 → 192 MB (GNS3 default for c3600 platform)
-    "c3660": {"ram": 192,  "slot0": "Leopard-2FE",  "default_nm": "NM-4E",    "max_slots": 6},
-
-    # c3640: no fixed slot 0, all 4 slots user-configurable
-    # RAM CORRECTED: 256 → 128 MB
-    "c3640": {"ram": 128,                            "default_nm": "NM-4E",    "max_slots": 4},
-
-    # c3620: no fixed slot 0, 2 NM slots
-    # RAM CORRECTED: 256 → 128 MB
-    "c3620": {"ram": 128,                            "default_nm": "NM-4E",    "max_slots": 2},
-
-    # c2691: slot 0 = GT96100-FE (fixed), 1 NM slot
-    # default_nm CORRECTED: NM-4E → NM-1FE-TX
-    # RAM CORRECTED: 256 → 192 MB (GNS3 default)
-    "c2691": {"ram": 192,  "slot0": "GT96100-FE",   "default_nm": "NM-1FE-TX","max_slots": 1},
-
-    # c2600: slot 0 = motherboard (varies), 1 NM slot
-    # default_nm: NM-1E (safe C3600_NMS choice for single-port expansion)
-    # RAM CORRECTED: 128 → 160 MB (GNS3 default)
-    "c2600": {"ram": 160,  "slot0": "NM-1FE-TX",    "default_nm": "NM-1E",    "max_slots": 1},
-
-    # c1700: slot 0 = C1700-MB-1FE (CORRECTED from C1700-MB-1ETH), NO NM slots
-    # RAM CORRECTED: 128 → 160 MB (GNS3 default)
-    "c1700": {"ram": 160,  "slot0": "C1700-MB-1FE", "default_nm": "NM-1FE-TX","max_slots": 0},
-
-    # c3600 alias: GNS3 uses platform="c3600" for all c36xx chassis.
-    # Default to c3660 spec as it's the most capable.
-    "c3600": {"ram": 192,  "slot0": "Leopard-2FE",  "default_nm": "NM-4E",    "max_slots": 6},
-}
 
 _NODE_TYPE_DIR: Dict[str, str] = {
     "dynamips":   "dynamips",
@@ -247,14 +159,14 @@ def _pre_export_validate(nodes: List[dict], links: List[dict]) -> None:
     def _dynamips_installed_adapters(node: dict) -> set:
         props    = node.get("properties", {})
         platform = str(props.get("platform", node.get("template_name", ""))).lower()
-        builtin  = _DYN_BUILTIN.get(platform, {})
+        builtin  = DYNAMIPS_BUILTIN_INTERFACE_DETAILS.get(platform, {})
         installed = set()
 
         if builtin.get("count", 0) > 0 or props.get("slot0"):
             installed.add(0)
 
-        hw = _DYN_HW_DEFAULTS.get(platform, {})
-        max_slots = hw.get("max_slots", 4)
+        slot_cfg = DYNAMIPS_SLOT_MODULES.get(platform, DYNAMIPS_FALLBACK)
+        max_slots = slot_cfg["max_slots"]
         for slot_num in range(1, max_slots + 1):
             if props.get(f"slot{slot_num}"):
                 installed.add(slot_num)
@@ -458,18 +370,18 @@ def _port_name(node: dict, adapter: int, port: int) -> str:
     if ntype == "dynamips":
         platform = str(props.get("platform", "")).lower() or template
         if adapter == 0:
-            bi  = _DYN_BUILTIN.get(platform, {"prefix": "FastEthernet", "count": 1})
+            bi  = DYNAMIPS_BUILTIN_INTERFACE_DETAILS.get(platform, {"prefix": "FastEthernet", "count": 1})
             pfx = bi.get("prefix") or "FastEthernet"
             if bi.get("count", 0) == 0:
                 mod = props.get("slot0", "")
-                if mod and mod in _DYN_MODULE:
-                    pfx = _DYN_MODULE[mod]["prefix"]
+                if mod and mod in DYNAMIPS_MODULE_INTERFACES:
+                    pfx = DYNAMIPS_MODULE_INTERFACES[mod]["prefix"]
                 else:
                     pfx = "FastEthernet"
             return f"{pfx}0/{port}"
         mod_name = props.get(f"slot{adapter}", "")
-        if mod_name and mod_name in _DYN_MODULE:
-            pfx = _DYN_MODULE[mod_name]["prefix"]
+        if mod_name and mod_name in DYNAMIPS_MODULE_INTERFACES:
+            pfx = DYNAMIPS_MODULE_INTERFACES[mod_name]["prefix"]
             return f"{pfx}{adapter}/{port}"
         return f"Ethernet{adapter}/{port}"
 
@@ -598,10 +510,10 @@ def _clean_properties(node: dict) -> dict:
 
 def _detect_dynamips_platform(props: dict, template: str) -> str:
     existing = str(props.get("platform", "")).lower().strip()
-    if existing and existing in _DYN_HW_DEFAULTS:
+    if existing and existing in DYNAMIPS_SLOT_MODULES:
         return existing
     name_lower = str(template).lower()
-    for platform in _DYN_HW_DEFAULTS:
+    for platform in DYNAMIPS_SLOT_MODULES:
         if platform in name_lower or platform[1:] in name_lower:
             return platform
     logger.warning(
@@ -618,10 +530,10 @@ def _inject_dynamips_properties(
     Uses setdefault throughout so hw_config output is never overwritten.
     """
     platform = _detect_dynamips_platform(props, template)
-    hw       = _DYN_HW_DEFAULTS.get(platform, _DYN_HW_DEFAULTS["c3745"])
+    slot_cfg  = DYNAMIPS_SLOT_MODULES.get(platform, DYNAMIPS_SLOT_MODULES["c3745"])
 
     props.setdefault("platform", platform)
-    props.setdefault("ram", hw["ram"])
+    props.setdefault("ram", DYNAMIPS_RAM_DEFAULTS.get(platform, 256))
 
     if "image" not in props:
         placeholder = f"{platform}-adventerprisek9-mz.124-25d.bin"
@@ -631,8 +543,9 @@ def _inject_dynamips_properties(
             node.get("name", "?"), placeholder,
         )
 
-    if "slot0" not in props and "slot0" in hw:
-        props["slot0"] = hw["slot0"]
+    slot0_default = DYNAMIPS_SLOT0_DEFAULTS.get(platform)
+    if "slot0" not in props and slot0_default:
+        props["slot0"] = slot0_default
 
     nid              = node.get("node_id", "")
     max_adapter      = 0
@@ -647,9 +560,9 @@ def _inject_dynamips_properties(
             if link.get("link_type") == "serial":
                 serial_adapter_set.add(adapter)
 
-    default_nm = hw["default_nm"]
+    default_nm = slot_cfg["module"]
     serial_nm  = "NM-4T" if default_nm.startswith("NM") else "PA-4T+"
-    max_slots  = hw["max_slots"]
+    max_slots  = slot_cfg["max_slots"]
 
     for slot_num in range(1, min(max_adapter + 1, max_slots + 1)):
         slot_key = f"slot{slot_num}"

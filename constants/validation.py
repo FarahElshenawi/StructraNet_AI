@@ -9,8 +9,8 @@ Verified against:
 Key corrections vs previous version:
   1. C3700_NMS: removed NM-1E, NM-4E, NM-1T — those are C3600-only.
      Official C3700_NMS = ("NM-1FE-TX", "NM-4T", "NM-16ESW")
-  2. C3600_NMS: added missing NM-1D.
-     Official C3600_NMS = ("NM-1FE-TX", "NM-1E", "NM-4E", "NM-1D", "NM-4T", "NM-16ESW")
+  2. C3600_NMS: removed NM-1D (does not exist in GNS3 source).
+     Official C3600_NMS = ("NM-1FE-TX", "NM-1E", "NM-4E", "NM-16ESW", "NM-4T")
   3. c1700: NO NM slots. Slot 0 is motherboard-only (C1700-MB-1FE).
      Removed NM-1FE-TX/NM-1E/NM-4E from c1700 slots — they are invalid there.
      Corrected chip name C1700-MB-1ETH → C1700-MB-1FE.
@@ -24,7 +24,11 @@ Key corrections vs previous version:
 
 from typing import Dict, FrozenSet, List, Tuple
 
-from constants.hardware import DYNAMIPS_MODULE_INTERFACES
+from constants.hardware import (
+    C2600_MOTHERBOARDS,
+    C2600_NMS,
+    DYNAMIPS_MODULE_INTERFACES,
+)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  Node-type taxonomy
@@ -56,7 +60,8 @@ APPLIANCE_NODE_TYPES: FrozenSet[str] = frozenset([
 
 # C3700_NMS: valid for c3725, c3745, c2691
 # Source: gns3-gui settings.py C3700_NMS = ("NM-1FE-TX", "NM-4T", "NM-16ESW")
-# NM-1E, NM-4E, NM-1T are C3600-only and must NOT appear here.
+# NM-1E, NM-4E, NM-1T, NM-1D are C3600-only and must NOT appear here.
+# (NM-1D does not exist in GNS3 at all; removed from C3600_NMS too.)
 _C3700_NMS: List[str] = [
     "NM-1FE-TX",
     "NM-4T",
@@ -65,16 +70,26 @@ _C3700_NMS: List[str] = [
 
 # C3600_NMS: valid for c3620, c3640, c3660
 # Source: gns3-gui settings.py C3600_NMS = ("NM-1FE-TX", "NM-1E", "NM-4E",
-#                                            "NM-1D", "NM-4T", "NM-16ESW")
-# NM-1D (ISDN BRI) added — was missing in previous version.
+#                                            "NM-16ESW", "NM-4T")
+# NM-1D does NOT exist in GNS3 — removed (was erroneously added).
 _C3600_NMS: List[str] = [
     "NM-1FE-TX",
     "NM-1E",
     "NM-4E",
-    "NM-1D",
-    "NM-4T",
     "NM-16ESW",
+    "NM-4T",
 ]
+
+# C2600_NMS: valid for c2600 slot 1 only
+# Source: gns3-gui settings.py C2600_NMS = ("NM-1FE-TX", "NM-1E", "NM-4E", "NM-16ESW")
+# NO serial modules — c2600 serial is WIC-only (not modeled here)
+# Imported from constants.hardware for single source of truth.
+_C2600_NMS: List[str] = list(C2600_NMS)
+
+# C2600_MOTHERBOARDS: valid for c2600 slot 0 only
+# Source: gns3-gui settings.py C2600_MOTHERBOARDS
+# These are motherboard chips, NOT Network Modules.
+_C2600_MOTHERBOARDS: List[str] = list(C2600_MOTHERBOARDS)
 
 # C7200_PAS: valid for c7200 slots 1-6
 # Source: gns3-gui settings.py C7200_PAS
@@ -186,15 +201,16 @@ DYNAMIPS_COMPAT: Dict[str, Dict] = {
     },
 
     # ── c2600 ────────────────────────────────────────────────────────────────
-    # Slot 0 = motherboard chip (varies by chassis: CISCO2600-MB-2FE for XM,
-    #          CISCO2600-MB-1E for older). 1 FastEthernet built-in (minimum).
-    # Slot 1 = 1 configurable NM slot using C3600_NMS.
-    # (Previous version incorrectly had 2 configurable NM slots.)
+    # Slot 0 = C2600-MB-* motherboard chip (NOT C3600_NMS — those are NM modules
+    #          that are invalid in the motherboard slot). Acceptable values:
+    #          C2600-MB-1E, C2600-MB-2E, C2600-MB-1FE, C2600-MB-2FE.
+    # Slot 1 = 1 configurable NM slot using C2600_NMS (no serial modules).
+    # (Previous version incorrectly used C3600_NMS for both slots.)
     "c2600": {
         "builtin_ifaces": 1,
         "slots": {
-            0: _C3600_NMS,   # motherboard can be replaced but defaults to 1 FE
-            1: _C3600_NMS,
+            0: _C2600_MOTHERBOARDS,  # motherboard chips only
+            1: _C2600_NMS,           # C2600_NMS — no serial modules
         },
         "valid_images": [r"c2600.*\.bin"],
         "ram_range": (64, 256),
@@ -221,7 +237,7 @@ DYNAMIPS_COMPAT: Dict[str, Dict] = {
     "c3600": {
         "builtin_ifaces": 2,
         "slots": {
-            0: ["Leopard-2FE", "GT96100-FE"],  # varies by chassis
+            0: ["Leopard-2FE"] + _C3600_NMS,  # Leopard-2FE for c3660; C3600_NMS for c3640/c3620
             1: _C3600_NMS, 2: _C3600_NMS, 3: _C3600_NMS,
             4: _C3600_NMS, 5: _C3600_NMS, 6: _C3600_NMS,
         },
@@ -252,10 +268,12 @@ _EXTRA_MODULE_PORTS: Dict[str, int] = {
     "C1700-MB-1FE":   1,
     "PA-A1":          1,
     "PA-POS-OC3":     1,
-    "NM-1D":          1,   # ISDN BRI — 1 port
-    # c2600 motherboard chips
-    "CISCO2600-MB-2FE": 2,
-    "CISCO2600-MB-1E":  1,
+    # NM-1D removed — does not exist in GNS3 source code
+    # c2600 motherboard chips — GNS3 source: C2600_MOTHERBOARDS
+    "C2600-MB-1E":    1,
+    "C2600-MB-2E":    2,
+    "C2600-MB-1FE":   1,
+    "C2600-MB-2FE":   2,
     "GT96100-FE":       2,
 }
 for _mod, _count in _EXTRA_MODULE_PORTS.items():

@@ -11,9 +11,11 @@ V3.1 corrections:
   - Added c3600 platform alias so GNS3-exported topologies with
     platform="c3600" are handled instead of falling to the fallback
   - serial_nm selection: NM-4T for all NM-based platforms (c3745, c3725,
-    c2691, c3660, c3640, c3620, c2600); PA-4T+ only for c7200
+    c2691, c3660, c3640, c3620); PA-4T+ only for c7200
+    c2600 has NO serial NM slots (C2600_NMS has no serial modules)
   - DYNAMIPS_SERIAL_MODULE_INTERFACES now correctly contains only
-    Serial-prefix modules (PA-4T+, PA-8T, NM-4T, NM-1T)
+    Serial-prefix modules (PA-4T+, PA-8T, NM-4T)
+    NM-1T has been ERADICATED — it does not exist in GNS3
 
 This module is the SINGLE SOURCE OF TRUTH for all hardware constants
 used across the pipeline. Other modules import from here.

@@ -476,7 +476,7 @@ catalog = load_catalog("my_custom_appliances.json")
 
 **Ethernet modules:** PA-8E (8 ports), PA-4E (4 ports), PA-FE-TX (1 port), NM-4E (4 ports), NM-1E (1 port), GT96100-FE (2 ports)
 
-**Serial modules:** PA-4T+ (4 ports), NM-4T (4 ports), NM-1T (1 port)
+**Serial modules:** PA-4T+ (4 ports), PA-8T (8 ports), NM-4T (4 ports)
 
 The hardware injector automatically selects the correct module type based on whether a link is Ethernet or serial, and computes how many slots are needed to satisfy the link count.
 
