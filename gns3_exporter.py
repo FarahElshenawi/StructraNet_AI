@@ -1,8 +1,25 @@
 """
-gns3_exporter.py — Structranet AI  ·  GNS3 Portable Project Exporter  (V4.4)
+gns3_exporter.py — Structranet AI  ·  GNS3 Portable Project Exporter  (V4.5)
 
 Converts final_topology.json → network.gns3project (a ZIP importable via
 GNS3 GUI → File → Import portable project).
+
+V4.5 changes vs V4.4
+─────────────────────
+  • FIX: _clean_properties no longer injects file-pointer keys
+    (startup_config, private_config). These are NOT valid properties
+    in the GNS3 Dynamips/IOU/QEMU schemas — the schemas enforce
+    additionalProperties: false, so injecting them causes:
+      "Additional properties are not allowed ('startup_config' was unexpected)"
+    Content keys (startup_config_content, private_config_content,
+    startup_script) ARE valid schema properties and are now KEPT in
+    the output.  GNS3 reads them during portable project import and
+    writes the content to the correct config files.
+  • FIX: _FORBIDDEN_POINTER_KEYS — explicit set of pointer keys that
+    must be stripped from properties even if the LLM or upstream
+    pipeline accidentally includes them.  Covers startup_config,
+    private_config, and nvram.
+  • Removed _CONTENT_TO_POINTER mapping (no longer needed).
 
 V4.4 changes vs V4.3
 ─────────────────────
@@ -523,74 +540,85 @@ def _extract_configs(node: dict, node_uuid: str) -> Dict[str, str]:
 #  Properties cleaner
 # ═══════════════════════════════════════════════════════════════════════════════
 
-# Pipeline-only keys that carry raw config *content* embedded by the AI.
-# GNS3 server does NOT recognise these keys — it only recognises the
-# *file-pointer* keys (startup_config, private_config, startup_script)
-# that reference a file path inside the ZIP.  We must strip the content
-# keys and inject the correct file-pointer so GNS3 can find the packed
-# config file that _extract_configs() already wrote into the ZIP.
+# Config content keys that the AI embeds into node properties.
+# These are VALID GNS3 schema properties — keep them in the output.
+# However, content keys belonging to a DIFFERENT node type must be
+# stripped because they are not valid for this node type's schema
+# (GNS3 schemas have additionalProperties: false).
 _PIPELINE_CONTENT_KEYS: frozenset = frozenset(
     k for k, _, _ in FILE_CONFIG_TRIPLETS
 )
 
-# Mapping: content key → (GNS3 file-pointer key, standard filename).
-# The filenames here are the standard subpaths that _extract_configs()
-# writes into the ZIP under project-files/<type>/<uuid>/.
-#
-# NOTE: "startup_script" maps to ("startup_script", "startup.vpc") — the
-# content key and file-pointer key share the SAME NAME but have different
-# semantics.  The content key holds the raw VPCS script text; the
-# file-pointer key holds the filename "startup.vpc" that GNS3 looks up
-# inside the ZIP.  _clean_properties replaces the value in-place.
-_CONTENT_TO_POINTER: Dict[str, Tuple[str, str]] = {
-    "startup_config_content":  ("startup_config",  "startup-config.cfg"),
-    "private_config_content":  ("private_config",  "private-config.cfg"),
-    "startup_script":          ("startup_script",  "startup.vpc"),
-}
+# File-pointer keys that must NEVER appear in node properties.
+# These are NOT valid properties in ANY GNS3 node-type schema
+# (Dynamips, IOU, QEMU, VPCS all have additionalProperties: false).
+# They exist only in the .gns3 project file as path references, but
+# GNS3 rejects them when they appear in the node properties dict.
+# The LLM or upstream pipeline may accidentally include them — strip them.
+_FORBIDDEN_POINTER_KEYS: frozenset = frozenset([
+    "startup_config",    # Dynamips/IOU/QEMU — use startup_config_content instead
+    "private_config",   # Dynamips/IOU     — use private_config_content instead
+    "nvram",            # Dynamips         — not a valid schema property
+])
 
 
 def _clean_properties(node: dict) -> dict:
-    """Strip pipeline-only content keys and inject GNS3 file-pointer keys.
+    """Strip forbidden pointer keys and cross-type content keys from node properties.
 
-    The AI embeds raw config text into properties like
-    ``startup_config_content`` and ``startup_script``.  These keys are
-    *pipeline-only* — GNS3 ignores them on import.  Instead, GNS3 looks
-    for file-pointer keys (``startup_config``, ``private_config``,
-    ``startup_script``) whose values are relative filenames that must
-    exist inside the ZIP at ``project-files/<type>/<uuid>/``.
+    The GNS3 server validates each node's properties against its type-specific
+    schema with ``additionalProperties: false``.  This means ONLY properties
+    listed in the schema are allowed.
 
-    This function:
-      1. Detects which content keys are present in the node's properties.
-      2. Strips them (they have already been saved as files by
-         _extract_configs).
-      3. Injects the corresponding file-pointer key with the standard
-         GNS3 filename (e.g. ``"startup_config": "startup-config.cfg"``).
+    Two categories of keys are stripped:
+
+    1. **Forbidden pointer keys** (``startup_config``, ``private_config``,
+       ``nvram``) — These are NOT valid properties in ANY GNS3 node-type
+       schema.  They are file-path references that exist only in the
+       ``.gns3`` project file, not in the node properties dict.  The LLM
+       or upstream pipeline may accidentally include them (e.g. from GNS3
+       project examples), so they are explicitly stripped via
+       ``_FORBIDDEN_POINTER_KEYS``.
+
+    2. **Cross-type content keys** — Content keys like
+       ``startup_config_content`` and ``startup_script`` ARE valid properties
+       in their respective node-type schemas (Dynamips, IOU, QEMU, VPCS) and
+       must be KEPT.  However, a content key that belongs to a DIFFERENT node
+       type (e.g. ``startup_config_content`` on a VPCS node, or
+       ``startup_script`` on a Dynamips node) must be removed because it is
+       not in that node type's schema.
+
+    The config files embedded in the ZIP by ``_extract_configs()`` are read
+    by GNS3 during portable project import independently of the node
+    properties.  GNS3 copies them from
+    ``project-files/<type>/<uuid>/<subpath>`` to the project directory.
     """
     ntype = node.get("node_type", "")
     props = node.get("properties", {})
     cleaned: dict = {}
 
-    # Build the set of content keys that are relevant for this node type.
+    # Build the set of content keys that are valid for this node type.
     active_content_keys: set = set()
     for prop_key, target_type, _subpath in FILE_CONFIG_TRIPLETS:
         if target_type == ntype:
             active_content_keys.add(prop_key)
 
     for k, v in props.items():
-        if k in _PIPELINE_CONTENT_KEYS and k not in active_content_keys:
-            # Content key for a *different* node type — drop it.
-            continue
-        if k in active_content_keys:
-            # This is a content key for our node type.  Skip it (strip it)
-            # and inject the file-pointer instead.
-            pointer_key, pointer_val = _CONTENT_TO_POINTER[k]
-            cleaned[pointer_key] = pointer_val
+        # Strip forbidden file-pointer keys that are never valid in any
+        # GNS3 node-type schema.  The LLM or upstream pipeline may
+        # accidentally include them (e.g. from GNS3 project examples).
+        if k in _FORBIDDEN_POINTER_KEYS:
             logger.debug(
-                "Stripped pipeline key '%s' → injected '%s': '%s'",
-                k, pointer_key, pointer_val,
+                "Stripped forbidden pointer key '%s' from %s node", k, ntype,
             )
             continue
-        # Normal property — keep as-is.
+        if k in _PIPELINE_CONTENT_KEYS and k not in active_content_keys:
+            # Content key for a *different* node type — drop it.
+            # It is not valid in this node type's schema.
+            logger.debug(
+                "Stripped cross-type key '%s' (not valid for %s)", k, ntype,
+            )
+            continue
+        # Valid property (including content keys for THIS node type) — keep.
         cleaned[k] = v
 
     return cleaned
@@ -908,7 +936,7 @@ def convert(
             "port_name_format":  port_name_format,
             "port_segment_size": port_segment_size,
             "first_port_name":   n.get("first_port_name"),
-            "ports":             _build_ports(n, links_in),
+            # "ports":             _build_ports(n, links_in), --> read only you can't write 
         }
 
         if ntype in _APPLIANCE_TYPES:

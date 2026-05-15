@@ -192,7 +192,7 @@ def main():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
     # ── Step 1/5: Load appliance catalog ────────────────────────────────────
-    print("[1/5] Loading appliance catalog...")
+    print("[1/6] Loading appliance catalog...")
     catalog = load_catalog(args.catalog)
     inventory = catalog_to_inventory(catalog)
 
@@ -204,7 +204,7 @@ def main():
           f"{', '.join(d['name'] for d in inventory)}")
 
     # ── Step 2/5: Get user input ────────────────────────────────────────────
-    print(f"\n[2/5] Describe the network you want.")
+    print(f"\n[2/6] Describe the network you want.")
     print(f"  Available: {', '.join(d['name'] for d in inventory)}")
     if args.request:
         user_request = args.request

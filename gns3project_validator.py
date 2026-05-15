@@ -403,20 +403,45 @@ class GNS3ProjectValidator:
             nid   = node.get("node_id", "")
             props = node.get("properties", {})
 
-            if ntype in ("dynamips", "iou"):
-                startup_cfg = props.get("startup_config", "")
-                if startup_cfg:
-                    standard_path = f"project-files/{ntype}/{nid}/configs/startup-config.cfg"
-                    if standard_path not in self.zip_files:
-                        self._add_issue(WARNING, "ConfigPaths",
-                                        f"Node '{name}': startup_config='{startup_cfg}' "
-                                        f"but file not found in ZIP",
-                                        f"Expected: {standard_path}. "
-                                        f"If startup_config_content is in properties this is fine.")
+            if ntype in ("dynamips", "iou", "qemu"):
+                # Check for inline config content (valid GNS3 schema property).
+                # startup_config / private_config are NOT valid schema properties
+                # (they are forbidden pointer keys stripped by _clean_properties).
+                # GNS3 reads startup_config_content during import and writes it
+                # to the config files itself.
+                startup_content = props.get("startup_config_content", "")
+                private_content = props.get("private_config_content", "")
+                has_inline = bool(startup_content) or bool(private_content)
+
+                standard_path = f"project-files/{ntype}/{nid}/configs/startup-config.cfg"
+                config_in_zip = standard_path in self.zip_files
+
+                if has_inline and not config_in_zip:
+                    # Content is inline — this is fine, GNS3 will create the
+                    # file from startup_config_content on import.
                     if self.verbose:
-                        found = standard_path in self.zip_files
-                        print(f"     {name}: {standard_path} → "
-                              f"{'FOUND' if found else 'MISSING (using inline content)'}")
+                        print(f"     {name}: inline config content "
+                              f"({len(startup_content)} chars) — ZIP file not needed")
+                elif not has_inline and not config_in_zip:
+                    self._add_issue(INFO, "ConfigPaths",
+                                    f"Node '{name}' has no startup config "
+                                    f"(no startup_config_content and no ZIP file)",
+                                    "Node will boot with default config")
+                elif config_in_zip:
+                    if self.verbose:
+                        print(f"     {name}: {standard_path} → FOUND")
+
+                # Also check for forbidden pointer keys that would cause
+                # GNS3 import rejection (should have been stripped by
+                # _clean_properties but catch them here too).
+                for forbidden_key in ("startup_config", "private_config", "nvram"):
+                    if props.get(forbidden_key):
+                        self._add_issue(ERROR, "ConfigPaths",
+                                        f"Node '{name}' has forbidden pointer key "
+                                        f"'{forbidden_key}' in properties",
+                                        "GNS3 schemas enforce additionalProperties: false. "
+                                        "This key will cause: 'Additional properties are "
+                                        "not allowed'. Use startup_config_content instead.")
 
             elif ntype == "vpcs":
                 startup_script = props.get("startup_script", "")
