@@ -157,11 +157,32 @@ def filter_inventory_by_profile(
     inventory: List[Dict[str, Any]],
     profile: PreflightProfile,
 ) -> Tuple[List[Dict[str, Any]], set[str]]:
-    """Return inventory filtered by profile support and blocked type set."""
+    """Return inventory filtered by profile support and blocked type set.
+
+    When ``profile.require_template_image_map`` is True, a strict
+    shift-left filter is applied in addition to the type-based block:
+
+      * ``ethernet_switch`` and ``ethernet_hub`` always pass (built-in,
+        no external image required).
+      * Every other node type MUST have its ``name`` present as a key
+        in ``profile.normalized_template_image_map`` — otherwise it is
+        silently dropped so the LLM can never see or select it.
+    """
     blocked = profile.unsupported_node_types
     filtered = [
         d for d in inventory
         if str(d.get("gns3_type", "")).lower() not in blocked
     ]
+
+    # ── Shift-left image-map gate ──────────────────────────────────────────
+    if profile.require_template_image_map:
+        allowed_names = profile.normalized_template_image_map
+        builtin_types = {"ethernet_switch", "ethernet_hub"}
+        filtered = [
+            d for d in filtered
+            if str(d.get("gns3_type", "")).lower() in builtin_types
+            or str(d.get("name", "")).strip() in allowed_names
+        ]
+
     return filtered, blocked
 
