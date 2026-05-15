@@ -1,18 +1,36 @@
 from typing import Dict, FrozenSet, List, Optional, Tuple
 
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Node-type taxonomy
+#  Moved from constants/validation.py — these are GNS3 node type enums,
+#  not validation limits.  They define the set of valid GNS3 node types.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+VALID_NODE_TYPES: FrozenSet[str] = frozenset([
+    "cloud", "nat", "ethernet_hub", "ethernet_switch",
+    "frame_relay_switch", "atm_switch",
+    "docker", "dynamips", "vpcs", "traceng",
+    "virtualbox", "vmware", "iou", "qemu",
+])
+
+BUILTIN_NODE_TYPES: FrozenSet[str] = frozenset([
+    "vpcs", "ethernet_switch", "ethernet_hub",
+    "cloud", "nat", "traceng",
+    "frame_relay_switch", "atm_switch",
+])
+
+APPLIANCE_NODE_TYPES: FrozenSet[str] = frozenset([
+    "dynamips", "iou", "qemu", "docker", "virtualbox", "vmware",
+])
+
 GNS3_REVISION: int = 9
 GNS3_VERSION: str = "2.2.0"
 SCENE_WIDTH: int = 2000
 SCENE_HEIGHT: int = 1000
 
-FILE_CONFIG_PATHS: Dict[Tuple[str, str], str] = {
-    ("startup_config_content", "dynamips"): "startup-config.cfg",
-    ("startup_config_content", "iou"): "startup-config.cfg",
-    ("startup_config_content", "qemu"): "startup-config.cfg",
-    ("private_config_content", "dynamips"): "private-config.cfg",
-    ("private_config_content", "iou"): "private-config.cfg",
-    ("startup_script", "vpcs"): "startup.vpc",
-}
+# NOTE: FILE_CONFIG_PATHS was removed (V4.4) — it duplicated information
+# already in FILE_CONFIG_TRIPLETS and was never imported anywhere.
+# Use FILE_CONFIG_TRIPLETS as the single source of truth.
 
 FILE_CONFIG_TRIPLETS: List[Tuple[str, str, str]] = [
     ("startup_config_content", "dynamips", "configs/startup-config.cfg"),

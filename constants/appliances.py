@@ -1,12 +1,3 @@
-"""
-constants/appliances.py — Default appliance catalog constants.
-
-RAM defaults corrected to match GNS3 PLATFORMS_DEFAULT_RAM:
-  c1700: 128 → 160 MB
-  c2691: not in catalog but kept consistent in hw_config
-  Cisco 7200 (c7200): 512 MB  ✓ unchanged
-  Cisco 3745 (c3745): 256 MB  ✓ unchanged
-"""
 from typing import Any, Dict
 
 APPLIANCE_CATALOG: Dict[str, Dict[str, Any]] = {
@@ -14,9 +5,9 @@ APPLIANCE_CATALOG: Dict[str, Dict[str, Any]] = {
         "node_type": "dynamips",
         "platform": "c7200",
         "image": "c7200-adventerprisek9-mz.124-24.T5.image",
-        "ram": 512,      # GNS3 default: 512 MB ✓
+        "ram": 512,
         "nvram": 512,
-        "slot0": "C7200-IO-FE",   # I/O controller for c7200 (not a PA module)
+        "slot0": "C7200-IO-FE",
         "console_type": "telnet",
         "port_name_format": "FastEthernet{0}/{1}",
         "port_segment_size": 1,
@@ -25,9 +16,9 @@ APPLIANCE_CATALOG: Dict[str, Dict[str, Any]] = {
         "node_type": "dynamips",
         "platform": "c3745",
         "image": "c3745-adventerprisek9-mz.124-25d.image",
-        "ram": 256,      # GNS3 default: 256 MB ✓
+        "ram": 256,
         "nvram": 256,
-        "slot0": "GT96100-FE",    # Fixed 2-port FE motherboard chip ✓
+        "slot0": "GT96100-FE",
         "console_type": "telnet",
         "port_name_format": "FastEthernet{0}/{1}",
         "port_segment_size": 1,
@@ -61,15 +52,10 @@ APPLIANCE_CATALOG: Dict[str, Dict[str, Any]] = {
         "port_name_format": "Ethernet{0}",
         "port_segment_size": 1,
     },
-    "Ethernet Switch": {
-        "node_type": "ethernet_switch",
-        "console_type": "none",
-        "port_name_format": "Ethernet{0}",
-        "port_segment_size": 1,
-    },
     "Ethernet Hub": {
         "node_type": "ethernet_hub",
         "port_name_format": "Ethernet{0}",
         "port_segment_size": 1,
     },
 }
+

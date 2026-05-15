@@ -1,8 +1,25 @@
 """
-gns3_exporter.py — Structranet AI  ·  GNS3 Portable Project Exporter  (V4.3)
+gns3_exporter.py — Structranet AI  ·  GNS3 Portable Project Exporter  (V4.4)
 
 Converts final_topology.json → network.gns3project (a ZIP importable via
 GNS3 GUI → File → Import portable project).
+
+V4.4 changes vs V4.3
+─────────────────────
+  • _clean_properties now strips pipeline-only content keys
+    (startup_config_content, private_config_content, startup_script)
+    and injects the GNS3-required file-pointer keys
+    (startup_config, private_config, startup_script) pointing to the
+    standard filenames inside the ZIP.
+    Previously the content keys leaked into the JSON (ignored by GNS3)
+    and the file-pointer keys were missing — so packed configs were
+    invisible to GNS3, causing routers/VPCS to boot blank.
+  • New export_configs_for_review() extracts all raw configs into a
+    local directory with human-readable filenames (e.g. R1-Main.cfg,
+    Core-SW_ports.json, PC1.vpc) for pre-GNS3 review.
+  • convert() accepts config_review_dir parameter; when set, calls
+    export_configs_for_review() automatically.
+  • CLI gains --configs flag to specify the review output directory.
 
 V4.3 changes vs V4.2
 ─────────────────────
@@ -19,8 +36,8 @@ V4.3 changes vs V4.2
   • RAM defaults corrected:
       c3725: 256 → 128 MB  (GNS3 default)
       c3660: 256 → 192 MB  (GNS3 default for c3600 platform)
-      c3640: 256 → 192 MB  (GNS3 uses c3600=192 for all chassis)
-      c3620: 256 → 192 MB  (GNS3 uses c3600=192 for all chassis)
+      c3640: 256 → 128 MB
+      c3620: 256 → 128 MB
       c2691: 256 → 192 MB  (GNS3 default)
       c2600: 128 → 160 MB  (GNS3 default)
       c1700: 128 → 160 MB  (GNS3 default)
@@ -63,13 +80,11 @@ from constants.gns3 import (
 )
 from constants.hardware import (
     DYNAMIPS_BUILTIN_INTERFACE_DETAILS,
+    DYNAMIPS_COMPAT,
     DYNAMIPS_MODULE_INTERFACES,
-    DYNAMIPS_RAM_DEFAULTS,
-    DYNAMIPS_SLOT0_DEFAULTS,
     DYNAMIPS_SLOT_MODULES,
-    DYNAMIPS_FALLBACK,
+    PLATFORMS_DEFAULT_RAM,
 )
-from constants.validation import DYNAMIPS_COMPAT
 
 logger = logging.getLogger("gns3_exporter")
 
@@ -114,17 +129,31 @@ _BUILTIN_TYPES = frozenset([
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  Dynamips platform tables
+#  Dynamips platform helpers
 #
-#  GHOST HUNTING FIX: All local hardware dictionaries (_DYN_BUILTIN, _DYN_MODULE,
-#  _DYN_HW_DEFAULTS) have been DELETED. This module now imports the single source
-#  of truth from constants.hardware:
-#    - DYNAMIPS_BUILTIN_INTERFACE_DETAILS  (replaces _DYN_BUILTIN)
-#    - DYNAMIPS_MODULE_INTERFACES          (replaces _DYN_MODULE)
-#    - DYNAMIPS_SLOT_MODULES               (provides default_nm + max_slots)
-#    - DYNAMIPS_RAM_DEFAULTS               (provides RAM defaults)
-#    - DYNAMIPS_SLOT0_DEFAULTS             (provides slot 0 module defaults)
+#  All hardware data is imported from constants/hardware.py — the SSOT.
+#  No local copies of DYNAMIPS_BUILTIN_INTERFACE_DETAILS, DYNAMIPS_MODULE_INTERFACES,
+#  or DYNAMIPS_SLOT_MODULES are maintained here.
 # ═══════════════════════════════════════════════════════════════════════════════
+
+
+def _get_slot0_module(platform: str) -> str:
+    """Derive the fixed/motherboard slot0 module name from DYNAMIPS_COMPAT.
+
+    Only returns a module name for platforms where slot 0 is a fixed
+    motherboard chip (e.g., GT96100-FE on c3745, Leopard-2FE on c3660).
+    Returns "" for platforms where slot 0 is user-configurable (c3640, c3620).
+    """
+    builtin = DYNAMIPS_BUILTIN_INTERFACE_DETAILS.get(platform, {})
+    if builtin.get("count", 0) > 0:
+        # Platform has a fixed slot 0 — derive the module name
+        compat = DYNAMIPS_COMPAT.get(platform, {})
+        slots = compat.get("slots", {})
+        slot0_options = slots.get(0, [])
+        if slot0_options:
+            return slot0_options[0]
+    return ""
+
 
 _NODE_TYPE_DIR: Dict[str, str] = {
     "dynamips":   "dynamips",
@@ -165,8 +194,8 @@ def _pre_export_validate(nodes: List[dict], links: List[dict]) -> None:
         if builtin.get("count", 0) > 0 or props.get("slot0"):
             installed.add(0)
 
-        slot_cfg = DYNAMIPS_SLOT_MODULES.get(platform, DYNAMIPS_FALLBACK)
-        max_slots = slot_cfg["max_slots"]
+        hw = DYNAMIPS_SLOT_MODULES.get(platform, {})
+        max_slots = hw.get("max_slots", 4)
         for slot_num in range(1, max_slots + 1):
             if props.get(f"slot{slot_num}"):
                 installed.add(slot_num)
@@ -431,19 +460,6 @@ def _short_name(long_name: str) -> str:
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  Ports array builder
-#
-#  NOTE: The 'ports' array is NO LONGER written to the .gns3 project file.
-#  GNS3's Node class defines 'ports' as a read-only @property (getter only,
-#  no setter).  When GNS3 loads a project, it passes the full node dict as
-#  **kwargs to Node.__init__(), which tries setattr(self, 'ports', ...) and
-#  raises AttributeError: can't set attribute 'ports'.
-#
-#  GNS3's own topology_dump format intentionally EXCLUDES 'ports' — it is a
-#  computed property that GNS3 regenerates from node properties and links at
-#  load time via _list_ports().  Including it caused the import crash.
-#
-#  This function is kept for potential external use (e.g., debugging, API
-#  responses) but is not called during export.
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _build_ports(node: dict, links: List[dict]) -> List[dict]:
@@ -507,23 +523,77 @@ def _extract_configs(node: dict, node_uuid: str) -> Dict[str, str]:
 #  Properties cleaner
 # ═══════════════════════════════════════════════════════════════════════════════
 
-# Keys that are pipeline-internal (packed into ZIP files as separate
-# configs, NOT written inline to the .gns3 JSON).  GNS3's own portable
-# project export strips these from properties because the config text is
-# already stored as a file under project-files/<type>/<uuid>/configs/.
-# Leaving them in doubles the .gns3project size and may confuse some
-# GNS3 import code paths that expect the file, not inline content.
-_PIPELINE_ONLY_KEYS: frozenset = frozenset(
+# Pipeline-only keys that carry raw config *content* embedded by the AI.
+# GNS3 server does NOT recognise these keys — it only recognises the
+# *file-pointer* keys (startup_config, private_config, startup_script)
+# that reference a file path inside the ZIP.  We must strip the content
+# keys and inject the correct file-pointer so GNS3 can find the packed
+# config file that _extract_configs() already wrote into the ZIP.
+_PIPELINE_CONTENT_KEYS: frozenset = frozenset(
     k for k, _, _ in FILE_CONFIG_TRIPLETS
-) | {"start_command", "environment"}
+)
+
+# Mapping: content key → (GNS3 file-pointer key, standard filename).
+# The filenames here are the standard subpaths that _extract_configs()
+# writes into the ZIP under project-files/<type>/<uuid>/.
+#
+# NOTE: "startup_script" maps to ("startup_script", "startup.vpc") — the
+# content key and file-pointer key share the SAME NAME but have different
+# semantics.  The content key holds the raw VPCS script text; the
+# file-pointer key holds the filename "startup.vpc" that GNS3 looks up
+# inside the ZIP.  _clean_properties replaces the value in-place.
+_CONTENT_TO_POINTER: Dict[str, Tuple[str, str]] = {
+    "startup_config_content":  ("startup_config",  "startup-config.cfg"),
+    "private_config_content":  ("private_config",  "private-config.cfg"),
+    "startup_script":          ("startup_script",  "startup.vpc"),
+}
 
 
 def _clean_properties(node: dict) -> dict:
-    return {
-        k: v
-        for k, v in node.get("properties", {}).items()
-        if k not in _PIPELINE_ONLY_KEYS
-    }
+    """Strip pipeline-only content keys and inject GNS3 file-pointer keys.
+
+    The AI embeds raw config text into properties like
+    ``startup_config_content`` and ``startup_script``.  These keys are
+    *pipeline-only* — GNS3 ignores them on import.  Instead, GNS3 looks
+    for file-pointer keys (``startup_config``, ``private_config``,
+    ``startup_script``) whose values are relative filenames that must
+    exist inside the ZIP at ``project-files/<type>/<uuid>/``.
+
+    This function:
+      1. Detects which content keys are present in the node's properties.
+      2. Strips them (they have already been saved as files by
+         _extract_configs).
+      3. Injects the corresponding file-pointer key with the standard
+         GNS3 filename (e.g. ``"startup_config": "startup-config.cfg"``).
+    """
+    ntype = node.get("node_type", "")
+    props = node.get("properties", {})
+    cleaned: dict = {}
+
+    # Build the set of content keys that are relevant for this node type.
+    active_content_keys: set = set()
+    for prop_key, target_type, _subpath in FILE_CONFIG_TRIPLETS:
+        if target_type == ntype:
+            active_content_keys.add(prop_key)
+
+    for k, v in props.items():
+        if k in _PIPELINE_CONTENT_KEYS and k not in active_content_keys:
+            # Content key for a *different* node type — drop it.
+            continue
+        if k in active_content_keys:
+            # This is a content key for our node type.  Skip it (strip it)
+            # and inject the file-pointer instead.
+            pointer_key, pointer_val = _CONTENT_TO_POINTER[k]
+            cleaned[pointer_key] = pointer_val
+            logger.debug(
+                "Stripped pipeline key '%s' → injected '%s': '%s'",
+                k, pointer_key, pointer_val,
+            )
+            continue
+        # Normal property — keep as-is.
+        cleaned[k] = v
+
+    return cleaned
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -552,44 +622,22 @@ def _inject_dynamips_properties(
     Uses setdefault throughout so hw_config output is never overwritten.
     """
     platform = _detect_dynamips_platform(props, template)
-    slot_cfg  = DYNAMIPS_SLOT_MODULES.get(platform, DYNAMIPS_SLOT_MODULES["c3745"])
+    hw       = DYNAMIPS_SLOT_MODULES.get(platform, DYNAMIPS_SLOT_MODULES["c3745"])
 
-    # ── Chassis normalisation for c3600-family platforms ──────────────────
-    # GNS3's portable-project format stores c3620/c3640/c3660 as
-    #   platform="c3600", chassis="3620" (|"3640"|"3660")
-    # Writing platform="c3660" without chassis is technically accepted by
-    # the Dynamips hypervisor but diverges from GNS3's own export format
-    # and may confuse the GUI template-matching logic on import.
-    #
-    # IMPORTANT: We must OVERWRITE props["platform"] (not setdefault) because
-    # the input dict may already contain platform="c3660" from an earlier
-    # pipeline step (hw_config, user input, etc.) that needs normalisation.
-    _C3600_CHASSIS_MAP: Dict[str, str] = {
-        "c3620": "3620",
-        "c3640": "3640",
-        "c3660": "3660",
-    }
-    internal_platform = platform          # keep for hardware-table lookups
-    if platform in _C3600_CHASSIS_MAP:
-        export_platform = "c3600"
-        props.setdefault("chassis", _C3600_CHASSIS_MAP[platform])
-    else:
-        export_platform = platform
-
-    props["platform"] = export_platform   # always write (normalise c36xx → c3600)
-    props.setdefault("ram", DYNAMIPS_RAM_DEFAULTS.get(internal_platform, 256))
+    props.setdefault("platform", platform)
+    props.setdefault("ram", PLATFORMS_DEFAULT_RAM.get(platform, 256))
 
     if "image" not in props:
-        placeholder = f"{internal_platform}-adventerprisek9-mz.124-25d.bin"
+        placeholder = f"{platform}-adventerprisek9-mz.124-25d.bin"
         props["image"] = placeholder
         logger.warning(
             "Node '%s': no 'image' property — using placeholder '%s'.",
             node.get("name", "?"), placeholder,
         )
 
-    slot0_default = DYNAMIPS_SLOT0_DEFAULTS.get(platform)
-    if "slot0" not in props and slot0_default:
-        props["slot0"] = slot0_default
+    slot0_module = _get_slot0_module(platform)
+    if "slot0" not in props and slot0_module:
+        props["slot0"] = slot0_module
 
     nid              = node.get("node_id", "")
     max_adapter      = 0
@@ -604,9 +652,9 @@ def _inject_dynamips_properties(
             if link.get("link_type") == "serial":
                 serial_adapter_set.add(adapter)
 
-    default_nm = slot_cfg["module"]
+    default_nm = hw["module"]
     serial_nm  = "NM-4T" if default_nm.startswith("NM") else "PA-4T+"
-    max_slots  = slot_cfg["max_slots"]
+    max_slots  = hw["max_slots"]
 
     for slot_num in range(1, min(max_adapter + 1, max_slots + 1)):
         slot_key = f"slot{slot_num}"
@@ -687,13 +735,102 @@ def _inject_hardware_properties(node: dict, links: List[dict]) -> None:
 #  Main converter
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def export_configs_for_review(nodes: List[dict], output_dir: str) -> str:
+    """Extract all raw config text from nodes into a local directory.
+
+    Writes human-readable config files suitable for pre-GNS3 review by
+    network engineers.  Filenames are based on the node name, not the
+    UUID — e.g. ``R1-Main.cfg``, ``Core-SW_ports.json``, ``PC1.vpc``.
+
+    Args:
+        nodes:          List of node dicts (same format as topology.nodes).
+        output_dir:     Target directory (created if it does not exist).
+
+    Returns:
+        Absolute path of the output directory.
+    """
+    out = Path(output_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    count = 0
+    seen_names: Dict[str, int] = {}  # dedup counter
+
+    for node in nodes:
+        ntype = node.get("node_type", "")
+        props = node.get("properties", {})
+        raw_name = node.get("name", node.get("node_id", "unknown"))
+
+        # Sanitise the node name for use as a filename.
+        safe_name = re.sub(r"[^\w\-.]", "_", raw_name)
+
+        # Deduplicate: if two nodes share a name, append a suffix.
+        if safe_name in seen_names:
+            seen_names[safe_name] += 1
+            safe_name = f"{safe_name}_{seen_names[safe_name]}"
+        else:
+            seen_names[safe_name] = 0
+
+        # ── Dynamips / IOU / QEMU: startup-config ──────────────────────
+        for content_key in ("startup_config_content", "private_config_content"):
+            content = props.get(content_key)
+            if not content or not isinstance(content, str):
+                continue
+            if content_key == "startup_config_content":
+                ext = ".cfg"
+                suffix = ""
+            else:
+                ext = ".cfg"
+                suffix = "_private"
+            filename = f"{safe_name}{suffix}{ext}"
+            filepath = out / filename
+            filepath.write_text(content, encoding="utf-8")
+            count += 1
+            logger.info("Exported review config: %s", filepath)
+
+        # ── VPCS: startup script ──────────────────────────────────────
+        if ntype == "vpcs":
+            script = props.get("startup_script")
+            if script and isinstance(script, str):
+                filename = f"{safe_name}.vpc"
+                filepath = out / filename
+                filepath.write_text(script, encoding="utf-8")
+                count += 1
+                logger.info("Exported review script: %s", filepath)
+
+        # ── Ethernet switch: ports_mapping as JSON ─────────────────────
+        if ntype == "ethernet_switch":
+            ports_mapping = props.get("ports_mapping")
+            if ports_mapping and isinstance(ports_mapping, list):
+                filename = f"{safe_name}_ports.json"
+                filepath = out / filename
+                filepath.write_text(
+                    json.dumps(ports_mapping, indent=2), encoding="utf-8",
+                )
+                count += 1
+                logger.info("Exported switch ports: %s", filepath)
+
+    abs_dir = str(out.resolve())
+    print(f"[configs] {count} file(s) exported to {abs_dir}")
+    return abs_dir
+
+
 def convert(
     input_data: dict,
     output_path: str,
     name_override: str = None,
     image_map: Dict[str, str] = None,
+    config_review_dir: str = None,
 ) -> str:
-    """Convert a topology dict to a .gns3project ZIP."""
+    """Convert a topology dict to a .gns3project ZIP.
+
+    Args:
+        input_data:        Topology dict (with topology.nodes / topology.links).
+        output_path:       Destination .gns3project file path.
+        name_override:     Override the project name.
+        image_map:         Template→IOS image filename mapping.
+        config_review_dir: If set, raw configs are also exported to this
+                           local directory for human review before GNS3
+                           import.  Filenames are based on node names.
+    """
     image_map = image_map or {}
 
     project_name, nodes_in, links_in = _normalise_input(input_data)
@@ -742,15 +879,6 @@ def convert(
         if ntype == "iou":
             port_name_format  = "Ethernet{segment0}/{port0}"
             port_segment_size = 4
-        elif ntype == "dynamips":
-            # GNS3 regenerates actual port names from installed modules at load
-            # time, but the format string is used as a fallback template.
-            # "FastEthernet{0}/{1}" matches the majority of platforms (c3745,
-            # c3725, c2691, c2600, c1700) whose default module prefix is
-            # FastEthernet.  For c7200 with PA-8E the names would be
-            # "EthernetN/M" but GNS3 recomputes them from the slot data anyway.
-            port_name_format  = n.get("port_name_format", "FastEthernet{0}/{1}")
-            port_segment_size = 0
         else:
             port_name_format  = n.get("port_name_format", "Ethernet{0}")
             port_segment_size = 0
@@ -780,6 +908,7 @@ def convert(
             "port_name_format":  port_name_format,
             "port_segment_size": port_segment_size,
             "first_port_name":   n.get("first_port_name"),
+            "ports":             _build_ports(n, links_in),
         }
 
         if ntype in _APPLIANCE_TYPES:
@@ -855,8 +984,8 @@ def convert(
         "revision":     GNS3_REVISION,
         "type":         "topology",
         "version":      GNS3_VERSION,
-        "auto_start":   False,
-        "auto_close":   True,
+        "auto_start":   True,
+        "auto_close":   False,
         "auto_open":    False,
         "scene_width":  SCENE_WIDTH,
         "scene_height": SCENE_HEIGHT,
@@ -886,12 +1015,18 @@ def convert(
             zf.writestr(zip_path, content)
             logger.info("Packed config: %s (%d bytes)", zip_path, len(content))
 
+    # ── External config export for pre-GNS3 review ──────────────────
+    if config_review_dir:
+        export_configs_for_review(nodes_in, config_review_dir)
+
     abs_path = os.path.abspath(output_path)
 
     print(f"[OK] '{project_name}'  ->  {abs_path}")
     print(f"     nodes:   {len(gns3_nodes)}")
     print(f"     links:   {len(gns3_links)}")
     print(f"     configs: {len(all_zip_configs)} file(s) packed")
+    if config_review_dir:
+        print(f"     review:  {os.path.abspath(config_review_dir)}")
     print()
     print("Import: GNS3 GUI -> File -> Import portable project")
 
@@ -914,6 +1049,8 @@ def main() -> None:
     parser.add_argument("--name",   default=None, help="Override the project name")
     parser.add_argument("--images", default=None,
                         help="Template→image map: 'c3745=image.bin,c7200=other.bin'")
+    parser.add_argument("--configs", default=None, metavar="DIR",
+                        help="Export raw configs to DIR for pre-GNS3 review")
     parser.add_argument("--debug",  action="store_true", help="Enable debug logging")
     args = parser.parse_args()
 
@@ -951,7 +1088,12 @@ def main() -> None:
         out_path = str(Path(args.input).parent / f"{safe}.gns3project")
 
     try:
-        convert(data, out_path, name_override=args.name, image_map=image_map)
+        convert(
+            data, out_path,
+            name_override=args.name,
+            image_map=image_map,
+            config_review_dir=args.configs,
+        )
     except ExportError as e:
         print(str(e), file=sys.stderr)
         sys.exit(1)

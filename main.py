@@ -28,7 +28,7 @@ from appliance_catalog import load_catalog
 from ai_agent import generate_network_topology, process_and_save_topology
 from gns3_exporter import convert as export_gns3project
 from gns3project_validator import GNS3ProjectValidator
-from hw_config import DYNAMIPS_BUILTIN_PORTS, DYNAMIPS_BUILTIN_DEFAULT, DYNAMIPS_SLOT_MODULES
+from constants.hardware import DYNAMIPS_MAX_PORTS
 from preflight import (
     PreflightProfile,
     check_topology_compatibility,
@@ -68,6 +68,8 @@ def parse_args():
                         help="Output .gns3project path (default: output/<final_json_stem>.gns3project)")
     parser.add_argument("--no-validate", action="store_true",
                         help="Skip .gns3project structural validation")
+    parser.add_argument("--configs", type=str, default=None, metavar="DIR",
+                        help="Export raw configs to DIR for pre-GNS3 review")
     parser.add_argument("--yes", action="store_true",
                         help="Auto-approve generation without interactive confirmation")
     return parser.parse_args()
@@ -78,15 +80,8 @@ def parse_args():
 # ═══════════════════════════════════════════════════════════════════════════════
 
 # Port-count derivation constants
-# Derive Dynamips limits from hw_config single source of truth:
-# builtin ports + (ports_per_module * max_slots).
-_DYNAMIPS_MAX_PORTS = {
-    platform: (
-        DYNAMIPS_BUILTIN_PORTS.get(platform, DYNAMIPS_BUILTIN_DEFAULT)
-        + (cfg["ports_per_module"] * cfg["max_slots"])
-    )
-    for platform, cfg in DYNAMIPS_SLOT_MODULES.items()
-}
+# DYNAMIPS_MAX_PORTS is now imported from constants/hardware.py — the SSOT.
+_DYNAMIPS_MAX_PORTS = DYNAMIPS_MAX_PORTS
 _SINGLE_PORT_TYPES = {"vpcs", "traceng", "nat"}
 _MAX_EXPANDABLE_PORTS = {
     "iou": 16, "qemu": 8, "docker": 8,
@@ -345,11 +340,17 @@ def main():
         final_stem = Path(final_file).stem
         project_output = os.path.join(OUTPUT_DIR, f"{final_stem}.gns3project")
 
+    # Config review directory: use --configs flag, or default to output/configs_review
+    config_review_dir = args.configs
+    if config_review_dir is None:
+        config_review_dir = os.path.join(OUTPUT_DIR, "configs_review")
+
     try:
         project_path = export_gns3project(
             final_dict,
             project_output,
             image_map=profile.normalized_template_image_map,
+            config_review_dir=config_review_dir,
         )
         print(f"  Export complete: {project_path}")
     except Exception as exc:
