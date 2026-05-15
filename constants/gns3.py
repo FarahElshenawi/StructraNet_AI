@@ -150,3 +150,7 @@ GRID_COLUMNS_PER_ROW: int = 5
 GRID_X_OFFSET: int = -400
 GRID_Y_OFFSET: int = -200
 
+# Key stamped onto the topology dict after apply_switch_port_patches runs.
+# Checked by config_agent.run_phase2() to avoid running the patch twice.
+VLAN_PATCHED_KEY: str = "__vlan_patched__"
+

@@ -1,0 +1,445 @@
+diff --git a/ai_agent.py b/ai_agent.py
+index aa0a600..a500952 100644
+--- a/ai_agent.py
++++ b/ai_agent.py
+@@ -31,6 +31,7 @@ from typing import Optional, Set
+ from dotenv import load_dotenv
+ 
+ from constants.ai import DYNAMIPS_MAX_LINKS, MAX_RETRIES, SINGLE_LINK_TYPES
++from constants.gns3 import VLAN_PATCHED_KEY
+ from hw_config import inject_hardware_config
+ from llm_utils import _call_with_retry, _extract_json, _get_client
+ from port_assigner import build_topology_from_request
+@@ -45,10 +46,6 @@ logger = logging.getLogger("structranet.ai_agent")
+ DEFAULT_MODEL = os.getenv("AI_MODEL", "openrouter/owl-alpha")
+ MAX_TOKENS    = int(os.getenv("AI_MAX_TOKENS", "8192"))
+ 
+-# Key stamped onto the topology dict after apply_switch_port_patches runs.
+-# Checked by config_agent.run_phase2() to avoid running the patch twice.
+-_VLAN_PATCHED_KEY = "__vlan_patched__"
+-
+ 
+ # ═══════════════════════════════════════════════════════════════════════════════
+ #  Step 1 prompt
+@@ -274,7 +271,7 @@ def process_and_save_topology(
+ 
+     # Step 3: VLAN patch — always run here so every export path gets it
+     apply_switch_port_patches(enriched)
+-    enriched[_VLAN_PATCHED_KEY] = True
++    enriched[VLAN_PATCHED_KEY] = True
+     logger.info("Switch VLAN port patches applied in process_and_save_topology")
+ 
+     try:
+diff --git a/config_agent.py b/config_agent.py
+index 4f98bef..17a0ed1 100644
+--- a/config_agent.py
++++ b/config_agent.py
+@@ -25,6 +25,7 @@ from typing import Any, Dict, FrozenSet, List, Optional, Set, Tuple
+ from dotenv import load_dotenv
+ 
+ from constants.phase2 import ALLOWED_VALUE_TYPES, SOFTWARE_CONFIG_KEYS
++from constants.gns3 import VLAN_PATCHED_KEY
+ from context_builder import build_configuration_brief
+ from llm_utils import _call_with_retry, _extract_json, _get_client
+ from topology_finalizer import apply_switch_port_patches
+@@ -367,8 +368,16 @@ def run_phase2(
+     #   • Ports connected to hosts become access with the correct VLAN id
+     # This MUST happen before build_configuration_brief() so the brief and
+     # configs see the correct trunk/access layout.
+-    apply_switch_port_patches(phase1_dict)
+-    logger.info("Switch port patches applied")
++    #
++    # Guard: ai_agent.process_and_save_topology() already applies the patch
++    # and stamps the dict with VLAN_PATCHED_KEY.  Skip if already done to
++    # avoid redundant work (the function is idempotent, but the guard is
++    # cleaner and avoids unnecessary recomputation).
++    if not phase1_dict.get(VLAN_PATCHED_KEY):
++        apply_switch_port_patches(phase1_dict)
++        logger.info("Switch port patches applied")
++    else:
++        logger.info("Switch port patches already applied — skipping")
+ 
+     # ── Step 3: Build Configuration Brief ──
+     brief = build_configuration_brief(phase1_dict)
+diff --git a/constants/gns3.py b/constants/gns3.py
+index a146d2d..7eadf66 100644
+--- a/constants/gns3.py
++++ b/constants/gns3.py
+@@ -150,3 +150,7 @@ GRID_COLUMNS_PER_ROW: int = 5
+ GRID_X_OFFSET: int = -400
+ GRID_Y_OFFSET: int = -200
+ 
++# Key stamped onto the topology dict after apply_switch_port_patches runs.
++# Checked by config_agent.run_phase2() to avoid running the patch twice.
++VLAN_PATCHED_KEY: str = "__vlan_patched__"
++
+diff --git a/constants/hardware.py b/constants/hardware.py
+index 2bc9cbc..f1678a7 100644
+--- a/constants/hardware.py
++++ b/constants/hardware.py
+@@ -41,6 +41,11 @@ from typing import Any, Dict, FrozenSet, List, Tuple
+ #  Source: gns3-gui/settings.py (v2.2.59)
+ # ═══════════════════════════════════════════════════════════════════════════════
+ 
++# c2600 slot 0 motherboard options (NOT Network Modules — these are
++# the fixed motherboard chips that occupy slot 0 on c2600 platforms).
++# Source: gns3-gui/settings.py  C2600_MOTHERBOARDS
++C2600_MOTHERBOARDS: Tuple[str, ...] = ("C2600-MB-1E", "C2600-MB-2E", "C2600-MB-1FE", "C2600-MB-2FE")
++
+ # c2600 slot 1 NM options (SUBSET of C3600_NMS — lacks NM-1D and NM-4T)
+ # Source: gns3-gui/settings.py  C2600_NMS
+ C2600_NMS: Tuple[str, ...] = ("NM-1FE-TX", "NM-1E", "NM-4E", "NM-16ESW")
+@@ -235,7 +240,7 @@ DYNAMIPS_COMPAT: Dict[str, Dict] = {
+     "c2600": {
+         "builtin_ifaces": 1,   # safe minimum; actual depends on chassis
+         "slots": {
+-            0: ["C2600-MB-1E", "C2600-MB-2E", "C2600-MB-1FE", "C2600-MB-2FE"],
++            0: list(C2600_MOTHERBOARDS),
+             1: list(C2600_NMS),
+         },
+         "valid_images": [r"c2600.*\.bin"],
+diff --git a/constants/phase2.py b/constants/phase2.py
+index 422a255..1e7265f 100644
+--- a/constants/phase2.py
++++ b/constants/phase2.py
+@@ -1,14 +1,17 @@
+ from typing import Dict, FrozenSet, Tuple
+ 
+-SOFTWARE_CONFIG_KEYS: FrozenSet[str] = frozenset([
+-    "startup_config_content",
+-    "startup_script",
+-    "start_command",
+-    "environment",
+-])
++# Derive SOFTWARE_CONFIG_KEYS from the SSOT FILE_CONFIG_TRIPLETS in constants/gns3.py
++# plus the non-file-based config keys (start_command, environment).
++# This ensures phase2.py stays in sync with the exporter's config key list.
++from constants.gns3 import FILE_CONFIG_TRIPLETS
++
++SOFTWARE_CONFIG_KEYS: FrozenSet[str] = frozenset(
++    k for k, _, _ in FILE_CONFIG_TRIPLETS
++) | {"start_command", "environment"}
+ 
+ ALLOWED_VALUE_TYPES: Dict[str, Tuple[type, ...]] = {
+     "startup_config_content": (str,),
++    "private_config_content": (str,),
+     "startup_script": (str,),
+     "start_command": (str,),
+     "environment": (dict, str),
+diff --git a/constants/validation.py b/constants/validation.py
+index f1aa389..f786d07 100644
+--- a/constants/validation.py
++++ b/constants/validation.py
+@@ -1,280 +1,45 @@
+ """
+ constants/validation.py — Structural Validation Constants for Structranet AI
+ 
++This module re-exports constants from the canonical SSOT modules
++(constants/hardware.py and constants/gns3.py) for backward compatibility.
++
++All hardware facts (module lists, port counts, RAM defaults, slot configs,
++compatibility matrices) are defined in constants/hardware.py.
++All node-type taxonomy and GNS3 format constants are in constants/gns3.py.
++
++Previously this module contained duplicate definitions that could drift
++from the SSOT.  It has been refactored to import and re-export from
++the canonical sources, eliminating the drift risk.
++
+ Verified against:
+   gns3-gui/gns3/modules/dynamips/settings.py  ADAPTER_MATRIX
+   GNS3 Dynamips README
+   GNS3 official docs (cisco-ios-images-for-dynamips)
+-
+-Key corrections vs previous version:
+-  1. C3700_NMS: removed NM-1E, NM-4E, NM-1T — those are C3600-only.
+-     Official C3700_NMS = ("NM-1FE-TX", "NM-4T", "NM-16ESW")
+-  2. C3600_NMS: removed NM-1D (does not exist in GNS3 source).
+-     Official C3600_NMS = ("NM-1FE-TX", "NM-1E", "NM-4E", "NM-16ESW", "NM-4T")
+-  3. c1700: NO NM slots. Slot 0 is motherboard-only (C1700-MB-1FE).
+-     Removed NM-1FE-TX/NM-1E/NM-4E from c1700 slots — they are invalid there.
+-     Corrected chip name C1700-MB-1ETH → C1700-MB-1FE.
+-  4. c2600: only 1 NM slot (slot 1). Slot 0 is motherboard.
+-     Reduced from 2 slots to 1 configurable slot.
+-  5. c3660 builtin_ifaces corrected: Leopard-2FE provides 2 ports. (was correct)
+-  6. Added c3600 alias entry (GNS3 uses platform="c3600" for all 3620/3640/3660).
+-  7. c1700 ram_range: min 128MB per GNS3 docs (minimum image requires 128MB).
+-  8. MODULE_PORT_COUNT derived from constants/hardware.py — single source of truth.
+ """
+ 
+-from typing import Dict, FrozenSet, List, Tuple
++# ═══════════════════════════════════════════════════════════════════════════════
++#  Re-exports from SSOT modules
++#  Import from constants.validation is kept for backward compatibility,
++#  but all definitions come from the single source of truth.
++# ═══════════════════════════════════════════════════════════════════════════════
+ 
+-from constants.hardware import (
++# Node-type taxonomy — SSOT: constants/gns3.py
++from constants.gns3 import (                         # noqa: F401
++    VALID_NODE_TYPES,
++    BUILTIN_NODE_TYPES,
++    APPLIANCE_NODE_TYPES,
++)
++
++# Dynamips compatibility matrix — SSOT: constants/hardware.py
++from constants.hardware import (                     # noqa: F401
+     C2600_MOTHERBOARDS,
+     C2600_NMS,
++    C3600_NMS,
++    C3700_NMS,
++    C7200_PAS,
++    IO_C7200,
++    DYNAMIPS_COMPAT,
+     DYNAMIPS_MODULE_INTERFACES,
++    MODULE_PORT_COUNT,
+ )
+-
+-# ═══════════════════════════════════════════════════════════════════════════════
+-#  Node-type taxonomy
+-# ═══════════════════════════════════════════════════════════════════════════════
+-
+-VALID_NODE_TYPES: FrozenSet[str] = frozenset([
+-    "cloud", "nat", "ethernet_hub", "ethernet_switch",
+-    "frame_relay_switch", "atm_switch",
+-    "docker", "dynamips", "vpcs", "traceng",
+-    "virtualbox", "vmware", "iou", "qemu",
+-])
+-
+-BUILTIN_NODE_TYPES: FrozenSet[str] = frozenset([
+-    "vpcs", "ethernet_switch", "ethernet_hub",
+-    "cloud", "nat", "traceng",
+-    "frame_relay_switch", "atm_switch",
+-])
+-
+-APPLIANCE_NODE_TYPES: FrozenSet[str] = frozenset([
+-    "dynamips", "iou", "qemu", "docker", "virtualbox", "vmware",
+-])
+-
+-
+-# ═══════════════════════════════════════════════════════════════════════════════
+-#  Dynamips platform compatibility matrix
+-# ═══════════════════════════════════════════════════════════════════════════════
+-
+-# --- Module lists (sourced directly from GNS3 settings.py) ---
+-
+-# C3700_NMS: valid for c3725, c3745, c2691
+-# Source: gns3-gui settings.py C3700_NMS = ("NM-1FE-TX", "NM-4T", "NM-16ESW")
+-# NM-1E, NM-4E, NM-1T, NM-1D are C3600-only and must NOT appear here.
+-# (NM-1D does not exist in GNS3 at all; removed from C3600_NMS too.)
+-_C3700_NMS: List[str] = [
+-    "NM-1FE-TX",
+-    "NM-4T",
+-    "NM-16ESW",
+-]
+-
+-# C3600_NMS: valid for c3620, c3640, c3660
+-# Source: gns3-gui settings.py C3600_NMS = ("NM-1FE-TX", "NM-1E", "NM-4E",
+-#                                            "NM-16ESW", "NM-4T")
+-# NM-1D does NOT exist in GNS3 — removed (was erroneously added).
+-_C3600_NMS: List[str] = [
+-    "NM-1FE-TX",
+-    "NM-1E",
+-    "NM-4E",
+-    "NM-16ESW",
+-    "NM-4T",
+-]
+-
+-# C2600_NMS: valid for c2600 slot 1 only
+-# Source: gns3-gui settings.py C2600_NMS = ("NM-1FE-TX", "NM-1E", "NM-4E", "NM-16ESW")
+-# NO serial modules — c2600 serial is WIC-only (not modeled here)
+-# Imported from constants.hardware for single source of truth.
+-_C2600_NMS: List[str] = list(C2600_NMS)
+-
+-# C2600_MOTHERBOARDS: valid for c2600 slot 0 only
+-# Source: gns3-gui settings.py C2600_MOTHERBOARDS
+-# These are motherboard chips, NOT Network Modules.
+-_C2600_MOTHERBOARDS: List[str] = list(C2600_MOTHERBOARDS)
+-
+-# C7200_PAS: valid for c7200 slots 1-6
+-# Source: gns3-gui settings.py C7200_PAS
+-_C7200_PAS: List[str] = [
+-    "PA-A1", "PA-FE-TX", "PA-2FE-TX", "PA-GE",
+-    "PA-4T+", "PA-8T", "PA-4E", "PA-8E", "PA-POS-OC3",
+-]
+-
+-# IO_C7200: valid for c7200 slot 0 only
+-# Source: gns3-gui settings.py IO_C7200
+-_IO_C7200: List[str] = [
+-    "C7200-IO-FE",
+-    "C7200-IO-2FE",
+-    "C7200-IO-GE-E",
+-]
+-
+-DYNAMIPS_COMPAT: Dict[str, Dict] = {
+-
+-    # ── c7200 ────────────────────────────────────────────────────────────────
+-    # Slot 0 = I/O controller (required). Slots 1-6 = PA modules.
+-    "c7200": {
+-        "builtin_ifaces": 0,   # built-in count depends on IO controller chosen
+-        "slots": {
+-            0: _IO_C7200,
+-            1: _C7200_PAS, 2: _C7200_PAS, 3: _C7200_PAS,
+-            4: _C7200_PAS, 5: _C7200_PAS, 6: _C7200_PAS,
+-        },
+-        "valid_images": [r"c7200.*\.image", r"c7200.*\.bin"],
+-        "ram_range": (256, 1024),
+-    },
+-
+-    # ── c3745 ────────────────────────────────────────────────────────────────
+-    # Slot 0 = GT96100-FE (fixed, 2 FastEthernet ports).
+-    # Slots 1-4 = C3700_NMS only (NM-1FE-TX, NM-4T, NM-16ESW).
+-    # NM-4E is NOT valid here — it is C3600-only.
+-    "c3745": {
+-        "builtin_ifaces": 2,
+-        "slots": {
+-            0: ["GT96100-FE"],
+-            1: _C3700_NMS, 2: _C3700_NMS, 3: _C3700_NMS, 4: _C3700_NMS,
+-        },
+-        "valid_images": [r"c3745.*\.bin"],
+-        "ram_range": (128, 512),
+-    },
+-
+-    # ── c3725 ────────────────────────────────────────────────────────────────
+-    # Slot 0 = GT96100-FE (fixed, 2 FastEthernet ports).
+-    # Slots 1-2 = C3700_NMS only.
+-    "c3725": {
+-        "builtin_ifaces": 2,
+-        "slots": {
+-            0: ["GT96100-FE"],
+-            1: _C3700_NMS, 2: _C3700_NMS,
+-        },
+-        "valid_images": [r"c3725.*\.bin"],
+-        "ram_range": (128, 512),
+-    },
+-
+-    # ── c3660 ────────────────────────────────────────────────────────────────
+-    # Slot 0 = Leopard-2FE (fixed, 2 FastEthernet ports).
+-    # Slots 1-6 = C3600_NMS.
+-    # GNS3 stores this as platform="c3600", chassis="3660".
+-    "c3660": {
+-        "builtin_ifaces": 2,
+-        "slots": {
+-            0: ["Leopard-2FE"],
+-            1: _C3600_NMS, 2: _C3600_NMS, 3: _C3600_NMS,
+-            4: _C3600_NMS, 5: _C3600_NMS, 6: _C3600_NMS,
+-        },
+-        "valid_images": [r"c3660.*\.bin"],
+-        "ram_range": (128, 512),
+-    },
+-
+-    # ── c3640 ────────────────────────────────────────────────────────────────
+-    # No fixed motherboard Ethernet. All 4 slots are C3600_NMS.
+-    # GNS3 stores this as platform="c3600", chassis="3640".
+-    "c3640": {
+-        "builtin_ifaces": 0,
+-        "slots": {
+-            0: _C3600_NMS, 1: _C3600_NMS, 2: _C3600_NMS, 3: _C3600_NMS,
+-        },
+-        "valid_images": [r"c3640.*\.bin"],
+-        "ram_range": (128, 512),
+-    },
+-
+-    # ── c3620 ────────────────────────────────────────────────────────────────
+-    # No fixed motherboard Ethernet. 2 NM slots = C3600_NMS.
+-    # GNS3 stores this as platform="c3600", chassis="3620".
+-    "c3620": {
+-        "builtin_ifaces": 0,
+-        "slots": {
+-            0: _C3600_NMS, 1: _C3600_NMS,
+-        },
+-        "valid_images": [r"c3620.*\.bin"],
+-        "ram_range": (64, 256),
+-    },
+-
+-    # ── c2691 ────────────────────────────────────────────────────────────────
+-    # Slot 0 = GT96100-FE (fixed, 2 FastEthernet ports).
+-    # Slot 1 = C3700_NMS only (NM-1FE-TX, NM-4T, NM-16ESW).
+-    "c2691": {
+-        "builtin_ifaces": 2,
+-        "slots": {
+-            0: ["GT96100-FE"],
+-            1: _C3700_NMS,
+-        },
+-        "valid_images": [r"c2691.*\.bin"],
+-        "ram_range": (128, 512),
+-    },
+-
+-    # ── c2600 ────────────────────────────────────────────────────────────────
+-    # Slot 0 = C2600-MB-* motherboard chip (NOT C3600_NMS — those are NM modules
+-    #          that are invalid in the motherboard slot). Acceptable values:
+-    #          C2600-MB-1E, C2600-MB-2E, C2600-MB-1FE, C2600-MB-2FE.
+-    # Slot 1 = 1 configurable NM slot using C2600_NMS (no serial modules).
+-    # (Previous version incorrectly used C3600_NMS for both slots.)
+-    "c2600": {
+-        "builtin_ifaces": 1,
+-        "slots": {
+-            0: _C2600_MOTHERBOARDS,  # motherboard chips only
+-            1: _C2600_NMS,           # C2600_NMS — no serial modules
+-        },
+-        "valid_images": [r"c2600.*\.bin"],
+-        "ram_range": (64, 256),
+-    },
+-
+-    # ── c1700 ────────────────────────────────────────────────────────────────
+-    # Slot 0 = C1700-MB-1FE (fixed, 1 FastEthernet — corrected from C1700-MB-1ETH).
+-    # NO NM expansion slots. Only WIC subslots (not modeled here).
+-    # Adding NM modules to c1700 is invalid — GNS3 will reject them.
+-    "c1700": {
+-        "builtin_ifaces": 1,
+-        "slots": {
+-            0: ["C1700-MB-1FE"],
+-            # No NM slots — c1700 has no Network Module bay
+-        },
+-        "valid_images": [r"c1700.*\.bin"],
+-        "ram_range": (128, 256),
+-    },
+-
+-    # ── c3600 (alias) ────────────────────────────────────────────────────────
+-    # GNS3 exports all c3620/c3640/c3660 with platform="c3600".
+-    # This alias prevents lookup from falling to the fallback.
+-    # Uses c3660 spec (most capable: Leopard-2FE + 6 NM slots).
+-    "c3600": {
+-        "builtin_ifaces": 2,
+-        "slots": {
+-            0: ["Leopard-2FE"] + _C3600_NMS,  # Leopard-2FE for c3660; C3600_NMS for c3640/c3620
+-            1: _C3600_NMS, 2: _C3600_NMS, 3: _C3600_NMS,
+-            4: _C3600_NMS, 5: _C3600_NMS, 6: _C3600_NMS,
+-        },
+-        "valid_images": [r"c3[0-9]+.*\.bin"],
+-        "ram_range": (64, 512),
+-    },
+-}
+-
+-
+-# ═══════════════════════════════════════════════════════════════════════════════
+-#  Module → port count lookup
+-#  Derived from constants/hardware.py — single source of truth.
+-# ═══════════════════════════════════════════════════════════════════════════════
+-
+-MODULE_PORT_COUNT: Dict[str, int] = {
+-    name: info["count"]
+-    for name, info in DYNAMIPS_MODULE_INTERFACES.items()
+-}
+-
+-# Extra modules that appear in DYNAMIPS_COMPAT but may not be in
+-# DYNAMIPS_MODULE_INTERFACES (various motherboard and I/O chips).
+-_EXTRA_MODULE_PORTS: Dict[str, int] = {
+-    "Leopard-2FE":    2,
+-    "C7200-IO-FE":    1,
+-    "C7200-IO-2FE":   2,
+-    "C7200-IO-GE-E":  1,
+-    # Corrected name: C1700-MB-1FE (not C1700-MB-1ETH)
+-    "C1700-MB-1FE":   1,
+-    "PA-A1":          1,
+-    "PA-POS-OC3":     1,
+-    # NM-1D removed — does not exist in GNS3 source code
+-    # c2600 motherboard chips — GNS3 source: C2600_MOTHERBOARDS
+-    "C2600-MB-1E":    1,
+-    "C2600-MB-2E":    2,
+-    "C2600-MB-1FE":   1,
+-    "C2600-MB-2FE":   2,
+-    "GT96100-FE":       2,
+-}
+-for _mod, _count in _EXTRA_MODULE_PORTS.items():
+-    MODULE_PORT_COUNT.setdefault(_mod, _count)
+\ No newline at end of file

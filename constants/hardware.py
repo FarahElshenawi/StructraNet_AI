@@ -41,6 +41,11 @@ from typing import Any, Dict, FrozenSet, List, Tuple
 #  Source: gns3-gui/settings.py (v2.2.59)
 # ═══════════════════════════════════════════════════════════════════════════════
 
+# c2600 slot 0 motherboard options (NOT Network Modules — these are
+# the fixed motherboard chips that occupy slot 0 on c2600 platforms).
+# Source: gns3-gui/settings.py  C2600_MOTHERBOARDS
+C2600_MOTHERBOARDS: Tuple[str, ...] = ("C2600-MB-1E", "C2600-MB-2E", "C2600-MB-1FE", "C2600-MB-2FE")
+
 # c2600 slot 1 NM options (SUBSET of C3600_NMS — lacks NM-1D and NM-4T)
 # Source: gns3-gui/settings.py  C2600_NMS
 C2600_NMS: Tuple[str, ...] = ("NM-1FE-TX", "NM-1E", "NM-4E", "NM-16ESW")
@@ -235,7 +240,7 @@ DYNAMIPS_COMPAT: Dict[str, Dict] = {
     "c2600": {
         "builtin_ifaces": 1,   # safe minimum; actual depends on chassis
         "slots": {
-            0: ["C2600-MB-1E", "C2600-MB-2E", "C2600-MB-1FE", "C2600-MB-2FE"],
+            0: list(C2600_MOTHERBOARDS),
             1: list(C2600_NMS),
         },
         "valid_images": [r"c2600.*\.bin"],

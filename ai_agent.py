@@ -31,6 +31,7 @@ from typing import Optional, Set
 from dotenv import load_dotenv
 
 from constants.ai import DYNAMIPS_MAX_LINKS, MAX_RETRIES, SINGLE_LINK_TYPES
+from constants.gns3 import VLAN_PATCHED_KEY
 from hw_config import inject_hardware_config
 from llm_utils import _call_with_retry, _extract_json, _get_client
 from port_assigner import build_topology_from_request
@@ -44,10 +45,6 @@ logger = logging.getLogger("structranet.ai_agent")
 
 DEFAULT_MODEL = os.getenv("AI_MODEL", "openrouter/owl-alpha")
 MAX_TOKENS    = int(os.getenv("AI_MAX_TOKENS", "8192"))
-
-# Key stamped onto the topology dict after apply_switch_port_patches runs.
-# Checked by config_agent.run_phase2() to avoid running the patch twice.
-_VLAN_PATCHED_KEY = "__vlan_patched__"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -274,7 +271,7 @@ def process_and_save_topology(
 
     # Step 3: VLAN patch — always run here so every export path gets it
     apply_switch_port_patches(enriched)
-    enriched[_VLAN_PATCHED_KEY] = True
+    enriched[VLAN_PATCHED_KEY] = True
     logger.info("Switch VLAN port patches applied in process_and_save_topology")
 
     try:

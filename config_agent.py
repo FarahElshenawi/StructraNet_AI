@@ -25,6 +25,7 @@ from typing import Any, Dict, FrozenSet, List, Optional, Set, Tuple
 from dotenv import load_dotenv
 
 from constants.phase2 import ALLOWED_VALUE_TYPES, SOFTWARE_CONFIG_KEYS
+from constants.gns3 import VLAN_PATCHED_KEY
 from context_builder import build_configuration_brief
 from llm_utils import _call_with_retry, _extract_json, _get_client
 from topology_finalizer import apply_switch_port_patches
@@ -367,8 +368,16 @@ def run_phase2(
     #   • Ports connected to hosts become access with the correct VLAN id
     # This MUST happen before build_configuration_brief() so the brief and
     # configs see the correct trunk/access layout.
-    apply_switch_port_patches(phase1_dict)
-    logger.info("Switch port patches applied")
+    #
+    # Guard: ai_agent.process_and_save_topology() already applies the patch
+    # and stamps the dict with VLAN_PATCHED_KEY.  Skip if already done to
+    # avoid redundant work (the function is idempotent, but the guard is
+    # cleaner and avoids unnecessary recomputation).
+    if not phase1_dict.get(VLAN_PATCHED_KEY):
+        apply_switch_port_patches(phase1_dict)
+        logger.info("Switch port patches applied")
+    else:
+        logger.info("Switch port patches already applied — skipping")
 
     # ── Step 3: Build Configuration Brief ──
     brief = build_configuration_brief(phase1_dict)
