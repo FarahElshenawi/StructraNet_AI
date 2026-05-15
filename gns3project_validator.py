@@ -368,14 +368,27 @@ class GNS3ProjectValidator:
 
         node_map: Dict[str, dict] = {n.get("node_id"): n for n in nodes}
 
+        # Build port map from the 'ports' array if present in the .gns3 file.
+        # NOTE: GNS3's own topology_dump format does NOT include 'ports' in
+        # node data — it is a computed property recomputed from node properties
+        # and links at load time.  Projects exported without 'ports' are valid.
+        # We only perform port-reference checks when the 'ports' array exists.
         node_port_map: Dict[str, Set[Tuple[int, int]]] = {}
+        has_any_ports = False
         for node in nodes:
             nid   = node.get("node_id", "")
             ports = node.get("ports", [])
+            if ports:
+                has_any_ports = True
             node_port_map[nid] = {
                 (p.get("adapter_number", 0), p.get("port_number", 0))
                 for p in ports
             }
+
+        if not has_any_ports:
+            print("   No 'ports' arrays found in nodes — skipping port integrity check")
+            print("   (GNS3 recomputes ports at load time; 'ports' is not required)")
+            return
 
         for i, link in enumerate(links):
             for ep in link.get("nodes", []):
@@ -589,12 +602,10 @@ class GNS3ProjectValidator:
             for ep in link.get("nodes", []):
                 linked_nodes.add(ep.get("node_id"))
 
-        for node in nodes:
-            nid = node.get("node_id", "")
-            if nid in linked_nodes and not node.get("ports"):
-                self._add_issue(WARNING, "Links",
-                                f"Node '{node.get('name', '?')}' is linked but has no ports array",
-                                "The ports array should list all available interfaces")
+        # NOTE: The 'ports' array is NOT required in the .gns3 file format.
+        # GNS3's own topology_dump excludes it; GNS3 recomputes ports from
+        # node properties and links at load time.  So we do NOT warn about
+        # a missing 'ports' array — it is normal and expected.
 
         print(f"   Checked {len(links)} link(s)")
 

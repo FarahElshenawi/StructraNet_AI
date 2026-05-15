@@ -431,6 +431,19 @@ def _short_name(long_name: str) -> str:
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  Ports array builder
+#
+#  NOTE: The 'ports' array is NO LONGER written to the .gns3 project file.
+#  GNS3's Node class defines 'ports' as a read-only @property (getter only,
+#  no setter).  When GNS3 loads a project, it passes the full node dict as
+#  **kwargs to Node.__init__(), which tries setattr(self, 'ports', ...) and
+#  raises AttributeError: can't set attribute 'ports'.
+#
+#  GNS3's own topology_dump format intentionally EXCLUDES 'ports' — it is a
+#  computed property that GNS3 regenerates from node properties and links at
+#  load time via _list_ports().  Including it caused the import crash.
+#
+#  This function is kept for potential external use (e.g., debugging, API
+#  responses) but is not called during export.
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _build_ports(node: dict, links: List[dict]) -> List[dict]:
@@ -494,7 +507,16 @@ def _extract_configs(node: dict, node_uuid: str) -> Dict[str, str]:
 #  Properties cleaner
 # ═══════════════════════════════════════════════════════════════════════════════
 
-_PIPELINE_ONLY_KEYS: frozenset = frozenset()
+# Keys that are pipeline-internal (packed into ZIP files as separate
+# configs, NOT written inline to the .gns3 JSON).  GNS3's own portable
+# project export strips these from properties because the config text is
+# already stored as a file under project-files/<type>/<uuid>/configs/.
+# Leaving them in doubles the .gns3project size and may confuse some
+# GNS3 import code paths that expect the file, not inline content.
+_PIPELINE_ONLY_KEYS: frozenset = frozenset(
+    k for k, _, _ in FILE_CONFIG_TRIPLETS
+) | {"start_command", "environment"}
+
 
 def _clean_properties(node: dict) -> dict:
     return {
@@ -532,11 +554,33 @@ def _inject_dynamips_properties(
     platform = _detect_dynamips_platform(props, template)
     slot_cfg  = DYNAMIPS_SLOT_MODULES.get(platform, DYNAMIPS_SLOT_MODULES["c3745"])
 
-    props.setdefault("platform", platform)
-    props.setdefault("ram", DYNAMIPS_RAM_DEFAULTS.get(platform, 256))
+    # ── Chassis normalisation for c3600-family platforms ──────────────────
+    # GNS3's portable-project format stores c3620/c3640/c3660 as
+    #   platform="c3600", chassis="3620" (|"3640"|"3660")
+    # Writing platform="c3660" without chassis is technically accepted by
+    # the Dynamips hypervisor but diverges from GNS3's own export format
+    # and may confuse the GUI template-matching logic on import.
+    #
+    # IMPORTANT: We must OVERWRITE props["platform"] (not setdefault) because
+    # the input dict may already contain platform="c3660" from an earlier
+    # pipeline step (hw_config, user input, etc.) that needs normalisation.
+    _C3600_CHASSIS_MAP: Dict[str, str] = {
+        "c3620": "3620",
+        "c3640": "3640",
+        "c3660": "3660",
+    }
+    internal_platform = platform          # keep for hardware-table lookups
+    if platform in _C3600_CHASSIS_MAP:
+        export_platform = "c3600"
+        props.setdefault("chassis", _C3600_CHASSIS_MAP[platform])
+    else:
+        export_platform = platform
+
+    props["platform"] = export_platform   # always write (normalise c36xx → c3600)
+    props.setdefault("ram", DYNAMIPS_RAM_DEFAULTS.get(internal_platform, 256))
 
     if "image" not in props:
-        placeholder = f"{platform}-adventerprisek9-mz.124-25d.bin"
+        placeholder = f"{internal_platform}-adventerprisek9-mz.124-25d.bin"
         props["image"] = placeholder
         logger.warning(
             "Node '%s': no 'image' property — using placeholder '%s'.",
@@ -698,6 +742,15 @@ def convert(
         if ntype == "iou":
             port_name_format  = "Ethernet{segment0}/{port0}"
             port_segment_size = 4
+        elif ntype == "dynamips":
+            # GNS3 regenerates actual port names from installed modules at load
+            # time, but the format string is used as a fallback template.
+            # "FastEthernet{0}/{1}" matches the majority of platforms (c3745,
+            # c3725, c2691, c2600, c1700) whose default module prefix is
+            # FastEthernet.  For c7200 with PA-8E the names would be
+            # "EthernetN/M" but GNS3 recomputes them from the slot data anyway.
+            port_name_format  = n.get("port_name_format", "FastEthernet{0}/{1}")
+            port_segment_size = 0
         else:
             port_name_format  = n.get("port_name_format", "Ethernet{0}")
             port_segment_size = 0
@@ -727,7 +780,6 @@ def convert(
             "port_name_format":  port_name_format,
             "port_segment_size": port_segment_size,
             "first_port_name":   n.get("first_port_name"),
-            "ports":             _build_ports(n, links_in),
         }
 
         if ntype in _APPLIANCE_TYPES:
