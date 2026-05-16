@@ -1,6 +1,6 @@
 # Structranet AI
 
-**Natural Language → AI Designs Network → Validates → Exports Portable `.gns3project`**
+**Natural Language → AI Designs Network → Interactive Review → Validates → Exports Portable `.gns3project`**
 
 Structranet AI is an AI-powered virtual network engineer that transforms natural language descriptions into fully configured, offline GNS3 network topologies. Describe the network you want in plain English, and Structranet AI designs the topology, assigns hardware, generates IP addressing and routing configurations, and exports it as a portable `.gns3project` ZIP file that can be imported directly into GNS3.
 
@@ -14,6 +14,12 @@ Structranet AI is an AI-powered virtual network engineer that transforms natural
 - [Project Structure](#project-structure)
 - [Getting Started](#getting-started)
 - [Usage](#usage)
+- [Interactive Review Loop](#interactive-review-loop)
+- [Chain-of-Thought Reasoning](#chain-of-thought-reasoning)
+- [Image Verification Manifest](#image-verification-manifest)
+- [Rich Node Context](#rich-node-context)
+- [Multi-Turn Chat History](#multi-turn-chat-history)
+- [Security Profiles](#security-profiles)
 - [Supported Device Types](#supported-device-types)
 - [Key Design Decisions](#key-design-decisions)
 - [Validation & Testing](#validation--testing)
@@ -27,11 +33,15 @@ Structranet AI is an AI-powered virtual network engineer that transforms natural
 
 Network engineering is repetitive: spin up routers, assign IPs, configure routing protocols, wire switches. Structranet AI automates this entire workflow. A user describes their intent — *"Build a campus network with 3 VLANs, a core router, and 6 PCs"* — and the system:
 
-1. Uses an LLM to design the logical topology (which devices, which connections)
-2. Deterministically assigns adapter/port numbers (no LLM guesswork)
-3. Injects the correct hardware expansion modules (slot modules, adapter counts)
-4. Generates full software configurations (IPs, routing, VLANs, startup scripts)
-5. Exports a portable `.gns3project` ZIP that can be imported into any GNS3 installation
+1. Uses an LLM to reason step-by-step about the design (Chain-of-Thought), then generates the logical topology
+2. Presents the draft design to the user and pauses for approval or edit feedback
+3. Accepts iterative feedback and regenerates until the user approves (interactive Edit loop)
+4. Deterministically assigns adapter/port numbers (no LLM guesswork)
+5. Injects the correct hardware expansion modules (slot modules, adapter counts)
+6. Enriches every node with full interface maps, hardware summaries, and security metadata
+7. Generates an image verification manifest so users know exactly which GNS3 images are needed
+8. Generates full software configurations (IPs, routing, VLANs, startup scripts)
+9. Exports a portable `.gns3project` ZIP that can be imported into any GNS3 installation
 
 Every constant, path format, and schema field has been validated against the **GNS3 2.2 server source code** to ensure the exported project files import cleanly without errors.
 
@@ -39,37 +49,55 @@ Every constant, path format, and schema field has been validated against the **G
 
 ## Architecture
 
-Structranet AI uses a **two-phase pipeline** that separates logical design from physical configuration:
+Structranet AI uses a **two-phase pipeline** with an interactive checkpoint loop separating them:
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│  Phase 1: Topology + Hardware                                      │
+│  Phase 1: Topology + Hardware  (Interactive Loop)                  │
 │                                                                     │
-│  User Input ──► AI Agent (LLM) ──► TopologyRequest                │
+│  User Input ──► AI Agent (LLM) ──► CoT Reasoning + TopologyRequest │
 │       │              │                   (nodes + connections)      │
 │       │              │                        │                     │
-│       │              └─── Port Assigner ◄─────┘                    │
-│       │                    (deterministic)                          │
-│       │                        │                                    │
-│       │                  GNS3Project                                │
-│       │                        │                                    │
-│       │              Hardware Injector                              │
+│       │    ┌─────────▼──────────┐             │                     │
+│       │    │  CHECKPOINT PAUSE  │             │                     │
+│       │    │  Display Thinking  │             │                     │
+│       │    │  Display Topology  │             │                     │
+│       │    │  Continue / Edit   │             │                     │
+│       │    └──────┬──────┬──────┘             │                     │
+│       │     Edit  │      │ Continue           │                     │
+│       │     with  │      └────────────────────┘                     │
+│       │  feedback │             │                                    │
+│       │     (chat history       │                                    │
+│       │      preserved) ◄───────┘                                   │
+│       │                        │                                     │
+│       │                  Port Assigner                               │
+│       │                   (deterministic)                            │
+│       │                        │                                     │
+│       │              Hardware Injector                               │
 │       │           (slots, adapters, ports_mapping)                  │
-│       │                        │                                    │
+│       │                        │                                     │
+│       │              Node Enrichment                                 │
+│       │       (_interfaces, _hardware_summary,                      │
+│       │        _security_role, _zone, _link_count)                  │
+│       │                        │                                     │
 │       │              Switch Port Patcher                            │
 │       │           (VLAN trunk/access assignments)                   │
+│       │                        │                                     │
+│       │              Image Manifest Writer                          │
+│       │           (image_manifest.txt)                              │
 │       └────────────────────────│────────────────────────────────────┘
-                                    │
-┌───────────────────────────────────│─────────────────────────────────┐
-│  Phase 2: Software Configuration  │                                 │
-│                                   ▼                                 │
+                                 │
+┌────────────────────────────────│─────────────────────────────────────┐
+│  Phase 2: Software Configuration                                    │
+│                                ▼                                    │
 │  Context Builder ──► Config Brief ──► AI Agent (LLM)              │
 │       │                                         │                   │
 │       │                                  Software Configs           │
-│       │                                   (IPs, routing, VLANs)     │
+│       │                                   (IPs, routing, VLANs)    │
 │       │                                         │                   │
-│       └──────── Three-Gate Safe Merge ◄─────────┘                  │
+│       └──────── Three-Gate Safe Merge ◄──────────┘                 │
 │                  (whitelist → no-overwrite → type check)            │
+│                  (underscore keys always dropped)                   │
 │                        │                                            │
 │                  Final Topology JSON                                │
 └────────────────────────│────────────────────────────────────────────┘
@@ -85,18 +113,16 @@ Structranet AI uses a **two-phase pipeline** that separates logical design from 
 
 ## Pipeline
 
-The full CLI pipeline now runs in 6 steps:
+The full CLI pipeline runs in 6 steps:
 
 | Step | Module | Description |
 |------|--------|-------------|
 | 1/6 | Load catalog | Load built-in + custom appliance definitions |
-| 2/6 | User input + Preflight | CLI argument or interactive prompt; collect environment profile (GNS3 version + supported node families + security profile) |
-| 3/6 | `ai_agent` | LLM generates `TopologyRequest` (nodes + logical connections), constrained by profile support; security rules injected if profile != "none" |
-| 4/6 | `port_assigner` → `hw_config` → `topology_finalizer` | Deterministic port assignment + hardware slot injection + VLAN switch-port patching |
+| 2/6 | User input + Preflight | CLI argument or interactive prompt; collect environment profile |
+| 3/6 | `ai_agent` | LLM reasons step-by-step (CoT), then generates `TopologyRequest`; pipeline **pauses** for user approval or edit feedback; loop repeats with full chat history until approved |
+| 4/6 | `port_assigner` → `hw_config` → `_enrich_nodes` → `topology_finalizer` | Deterministic port assignment + hardware slot injection + node metadata enrichment + VLAN switch-port patching + image manifest generation |
 | 5/6 | `config_agent` | LLM generates software configs (IPs, routing, startup scripts); security hardening applied if profile != "none" |
 | 6/6 | `gns3_exporter` → `gns3project_validator` | Convert final topology JSON to portable `.gns3project` ZIP; run 11 structural checks to ensure import safety |
-
-Before phase 2 and before final export, `main.py` presents review checkpoints so the user can approve or stop.
 
 ---
 
@@ -104,12 +130,16 @@ Before phase 2 and before final export, `main.py` presents review checkpoints so
 
 ```
 structranet-ai/
-├── main.py                     # Grand orchestrator — 6-step CLI pipeline
+├── main.py                     # Grand orchestrator — 6-step CLI pipeline with interactive loop
 │
 ├── preflight.py                # Environment profile collection + compatibility gate + security profile
 │
-├── ai_agent.py                 # Phase 1: LLM topology generation (with optional security rules injection)
-├── config_agent.py             # Phase 2: LLM software config generation (with optional security hardening)
+├── ai_agent.py                 # Phase 1: LLM topology generation
+│                               #   SessionState dataclass (chat history, topology, thinking text)
+│                               #   CoT envelope parsing (thinking + topology keys)
+│                               #   _enrich_nodes() — rich node metadata injection
+│                               #   generate_image_manifest() — image_manifest.txt writer
+├── config_agent.py             # Phase 2: LLM software config generation
 ├── security_prompts.py         # Security profile prompt injection (none/basic/enterprise)
 ├── schema.py                   # Pydantic models (TopologyRequest, GNS3Project, etc.)
 │
@@ -140,37 +170,29 @@ structranet-ai/
 │
 ├── requirements.txt            # Python dependencies
 └── output/                     # Generated topology files
-    ├── _topology.json          # Phase 1 output (hardware-injected)
+    ├── _topology.json          # Phase 1 output (hardware-injected, enriched)
     ├── final_topology.json     # Phase 2 output (software configs merged)
+    ├── image_manifest.txt      # Image verification manifest (new in V4.0)
     ├── preflight_profile.json  # Saved environment profile
-    ├── generation_report.json  # Structured per-run report
+    ├── generation_report.json  # Structured per-run report (includes CoT + iterations)
     └── configs_review/         # Optional raw config export for pre-GNS3 review
 ```
 
 ### Module Responsibilities
 
-| Module | Role | Key Functions |
-|--------|------|---------------|
-| `main.py` | Entry point & pipeline orchestration | `parse_args()`, `catalog_to_inventory()`, `main()` |
-| `preflight.py` | Environment readiness checks + security profile | `collect_profile_interactive()`, `check_topology_compatibility()`, `filter_inventory_by_profile()` |
-| `ai_agent.py` | LLM topology design (with security injection) | `generate_network_topology()`, `process_and_save_topology()`, `_build_step1_prompt()` (now accepts security_profile) |
-| `config_agent.py` | LLM config generation (with security hardening) | `run_phase2()`, `safe_merge_configs()`, `generate_software_configs()` (now accepts security_profile) |
+| Module | Role | Key Functions / Types |
+|--------|------|----------------------|
+| `main.py` | Entry point, pipeline orchestration, interactive loop | `_checkpoint_loop()`, `_print_thinking()`, `_print_topology_summary()`, `parse_args()`, `main()` |
+| `preflight.py` | Environment readiness + security profile | `collect_profile_interactive()`, `check_topology_compatibility()`, `filter_inventory_by_profile()` |
+| `ai_agent.py` | LLM topology design, CoT, history, enrichment, manifest | `SessionState`, `generate_network_topology()`, `process_and_save_topology()`, `_enrich_nodes()`, `generate_image_manifest()` |
+| `config_agent.py` | LLM config generation + safe merge | `run_phase2()`, `safe_merge_configs()`, `generate_software_configs()` |
 | `security_prompts.py` | Security profile prompt templates | `get_topology_security_prompt()`, `get_config_security_prompt()` |
 | `schema.py` | Data contracts | `TopologyRequest`, `GNS3Project`, `validate_topology()`, `validate_topology_request()` |
 | `port_assigner.py` | Port number math | `assign_ports()`, `build_topology_from_request()` |
-| `hw_config.py` | Hardware expansion | `inject_hardware_config()` — Dynamips slots, IOU adapters, QEMU adapters, switch ports_mapping |
-| `topology_finalizer.py` | VLAN switching | `apply_switch_port_patches()` — trunk/access/dot1q port rewrites |
+| `hw_config.py` | Hardware expansion | `inject_hardware_config()` |
+| `topology_finalizer.py` | VLAN switching | `apply_switch_port_patches()` |
 | `context_builder.py` | LLM context builder | `build_configuration_brief()`, `resolve_port_name()`, `build_segments()` |
 | `llm_utils.py` | Shared LLM utilities (SSOT) | `_get_client()`, `_call_with_retry()`, `_extract_json()` |
-| `constants/gns3.py` | Shared GNS3 constants | `GNS3_REVISION`, `FILE_CONFIG_TRIPLETS`, `SYMBOL`, `PORT_NAME_FORMAT`, etc. |
-| `constants/hardware.py` | Shared hardware constants (SSOT) | Dynamips module tables, adapter limits, node type sets, compatibility matrix |
-| `constants/phase2.py` | Phase 2 merge constants | `SOFTWARE_CONFIG_KEYS`, `ALLOWED_VALUE_TYPES` |
-| `constants/ai.py` | AI generation constants | `MAX_RETRIES`, prompt-side link-limit tables |
-| `constants/appliances.py` | Appliance defaults constants | `APPLIANCE_CATALOG` |
-| `constants/validation.py` | Validation re-exports | Backward-compatible re-exports from hardware.py & gns3.py |
-| `appliance_catalog.py` | Template defaults loader | `get_appliance()`, `load_catalog()` with user overlay support |
-| `gns3_exporter.py` | ZIP packaging | `convert()` |
-| `gns3project_validator.py` | Deep validation | `GNS3ProjectValidator` — 11 structural checks against GNS3 spec |
 
 ---
 
@@ -190,7 +212,7 @@ git clone https://github.com/your-org/structranet-ai.git
 cd structranet-ai
 
 # Install dependencies
-pip install openai pydantic streamlit python-dotenv graphviz
+pip install openai pydantic python-dotenv
 
 # Create .env file
 cat > .env << 'EOF'
@@ -201,48 +223,79 @@ AI_MAX_TOKENS=8192
 EOF
 ```
 
-### Quick Start
+---
 
-**CLI mode:**
+## Usage
+
+### Basic interactive run (with checkpoint loop)
+
 ```bash
-# Generate, export, and validate .gns3project
 python main.py --request "Build a campus network with 2 routers, a core switch, 3 access switches, and 9 PCs across 3 VLANs"
+```
 
-# With security hardening (basic: SSH, AAA, NTP, Syslog)
-python main.py --request "3-router topology" --security-profile basic
+During Phase 1 you will see:
 
-# Enterprise security (ZBF, ACLs, DAI, DHCP Snooping, SNMPv3, redundancy, HSRP)
-python main.py --request "enterprise network" --security-profile enterprise
+1. The AI's **chain-of-thought reasoning** printed in a delimited box
+2. A **node and link table** showing the draft topology
+3. A prompt asking you to **Continue**, **Edit**, or **Quit**
 
-# Skip Phase 2 (software configs)
+If you choose **Edit**, type your modification feedback (e.g. *"Add a second router for redundancy and connect it to the core switch via serial"*). The pipeline re-runs Phase 1 with your feedback incorporated into the conversation history.
+
+### Common flags
+
+```bash
+# Skip the checkpoint loop (non-interactive / CI mode)
+python main.py --request "3-router topology" --auto-continue
+
+# Limit edit iterations
+python main.py --request "3-router topology" --max-edits 3
+
+# Skip Phase 2 (topology-only, no IOS configs)
 python main.py --request "3-router topology" --no-phase2
 
-# Custom .gns3project output path
-python main.py --request "3-router topology" --project-output output/my_lab.gns3project
+# Apply security hardening
+python main.py --request "3-router topology" --security-profile basic
+python main.py --request "enterprise network" --security-profile enterprise
 
-# Skip validator (not recommended)
-python main.py --request "3-router topology" --no-validate
+# Custom output paths
+python main.py --request "3-router topology" --output output/my_topo.json --project-output output/my_lab.gns3project
 
-# Export raw configs for pre-GNS3 review
+# Export raw configs for human review
 python main.py --request "3-router topology" --configs ./config_review
 
 # Use a saved preflight profile (non-interactive environment info)
 python main.py --request "3-router topology" --profile output/preflight_profile.json
 
-# Auto-approve interactive checkpoints
-python main.py --request "3-router topology" --yes
+# Skip structural validation
+python main.py --request "3-router topology" --no-validate
 ```
 
-**Programmatic export:**
+### CLI flag reference
+
+| Flag | Short | Default | Description |
+|------|-------|---------|-------------|
+| `--request` | `-r` | *(prompt)* | Network description (skips interactive prompt) |
+| `--output` | `-o` | `output/final_topology.json` | Output JSON file path |
+| `--catalog` | | | Path to custom appliance catalog JSON overlay |
+| `--profile` | | | Path to preflight environment profile JSON |
+| `--security-profile` | | `none` | Security hardening: `none` \| `basic` \| `enterprise` |
+| `--no-phase2` | | off | Skip Phase 2 (software configuration generation) |
+| `--project-output` | | auto | Output `.gns3project` path |
+| `--no-validate` | | off | Skip post-export structural validation |
+| `--configs` | | `output/configs_review` | Export raw configs to directory for pre-GNS3 review |
+| `--auto-continue` | | off | Skip interactive checkpoint loop |
+| `--yes` | | off | Alias for `--auto-continue` (also skips export confirmation) |
+| `--max-edits` | | `5` | Maximum Edit loop iterations before forced Continue |
+
+### Programmatic export
+
 ```python
 from gns3_exporter import convert
-
-# Load the final topology
 import json
+
 with open("output/final_topology.json") as f:
     topology = json.load(f)
 
-# Export as .gns3project ZIP
 path = convert(topology, "my_network.gns3project")
 print(f"Exported to: {path}")
 # Import: GNS3 GUI → File → Import portable project
@@ -250,107 +303,206 @@ print(f"Exported to: {path}")
 
 ---
 
-## Security Profiles
+## Interactive Review Loop
 
-Structranet AI includes **three built-in security profiles** that automatically harden topologies and configurations. Profiles are selected during preflight or via the `--security-profile` CLI flag.
+The Phase 1 checkpoint loop is the core of the V4.0 interactive experience.
 
-### Profile: "none" (Default)
+### Flow
 
-- No security rules injected
-- Pure lab/universal mode
-- LLM designs topology without architectural constraints
-- Configs contain only IP addressing and basic routing
-- **Use case**: Educational labs, proof-of-concept builds, testing
+```
+Phase 1 runs
+    │
+    ▼
+AI Thinking displayed (chain-of-thought box)
+    │
+    ▼
+Draft topology table displayed (nodes + links)
+    │
+    ▼
+User prompt: [C]ontinue / [E]dit / [Q]uit
+    │
+    ├── Continue → hardware injection → manifest → Phase 2
+    │
+    ├── Edit → capture feedback → append to chat history → re-run Phase 1
+    │             (loop, up to --max-edits times)
+    │
+    └── Quit → exit pipeline
+```
 
-### Profile: "basic"
+### Edit feedback examples
 
-Applies lightweight security hardening to every router:
+```
+  Your choice [C/e/q]: e
 
-**Topology rules**:
-- Mandatory NAT node for Internet edge (`NAT-ISP`)
-- Dedicated management VPCS host (`MGMT-PC` or `Admin-PC`)
-- All hosts connect via switch (never directly to router)
-- Node security fields: `security_role`, `zone` (OUTSIDE/INSIDE/MANAGEMENT)
+  Describe your changes:
+  > Add a redundant second router connected to Core-SW via serial link
+  > Add a DMZ switch between the router and the internet NAT node
+  > Replace the three access switches with two — merge F2-SW and F3-SW
+  > Use IOU L3 instead of Cisco 3745 for the router
+```
 
-**Config rules** (every router gets):
-- SSH (v2) with 12-char min password requirement
-- AAA (local authentication) with login rate-limiting
-- Syslog/NTP with standard servers (10.0.10.50, 10.0.10.100)
-- Service hardening (no finger, no small servers, source-route disable)
-- Banner and session timeout enforcement
+Each piece of feedback is appended to the chat history as a user message. The LLM receives the entire conversation context and modifies the existing design rather than generating an entirely new one from scratch.
 
-**Use case**: Small to medium labs with basic access controls
+### Non-interactive mode
 
-### Profile: "enterprise"
-
-Full security archetype with Zone-Based Firewall (ZBF), redundancy, and defense-in-depth:
-
-**Mandatory topology rules**:
-- **Perimeter Router** (node_id: "FW" or "R-EDGE"): Zone-Based Firewall, connects to NAT/Internet
-- **Core Switch** (node_id: "Core-SW"): Central distribution, VLAN aggregation
-- **DMZ Switch** (node_id: "DMZ-SW"): Isolated for servers, connected to perimeter router
-- **Management Switch** (node_id: "MGMT-SW"): Out-of-band management VLAN only
-- **SIEM** (node_id: "SIEM"): Syslog/monitoring host on MGMT-SW
-- **Secondary Router** (node_id: "FW2" or "R-EDGE2"): For ≥6-node topologies (redundancy via HSRP)
-
-**VLAN segmentation** (auto-detected from switch names):
-- VLAN 10 MGMT (`Mgmt`/`MGMT` prefix)
-- VLAN 20 USERS (`User`/`LAN` prefix)
-- VLAN 30 SERVERS (`Srv`/`Server` prefix)
-- VLAN 40 VOIP (`VoIP`/`Voice` prefix)
-- VLAN 50 IOT (`IoT` prefix)
-- VLAN 60 DMZ (`DMZ` prefix)
-- VLAN 100 GUEST (`Guest` prefix)
-- VLAN 999 NATIVE-UNUSED (trunk native, prevents VLAN hopping)
-
-**Config hardening** (every router gets):
-- Full Block A (universal): SSH, AAA, NTP auth, SNMPv3, Syslog to SIEM, loopback0, domain-name
-- Block B (perimeter router): **Zone-Based Firewall** (OUTSIDE/INSIDE/DMZ zones), anti-spoofing ACLs, TCP intercept (SYN flood protection), OSPF MD5 auth, NAT PAT overload
-- Block C (secondary/internal): OSPF auth, HSRP with MD5 authentication, redundant link failover
-- Block D (core/distribution switch): STP hardening, spanning-tree guard-root
-- Block E (access switches): DHCP Snooping, DAI (Dynamic ARP Inspection), port-security, storm-control, BPDU Guard
-- Block F (VPCS hosts): Auto-assigned IPs from VLAN subnets, correct gateway routing
-- Block G (SIEM): Fixed IP on MGMT VLAN
-
-**Use case**: Production networks, compliance-driven labs (PCI, HIPAA, enterprise security standards), realistic security training
+Pass `--auto-continue` or `--yes` to skip all prompts. The first generated topology is accepted automatically. Useful for CI pipelines, batch generation, and testing.
 
 ---
 
-### Preflight Profile JSON with Security
+## Chain-of-Thought Reasoning
 
-When using a saved preflight profile, include the `security_profile` field:
+When generating a topology, the LLM is required to reason step-by-step before committing to a design. The reasoning covers:
+
+- Which device types best fit the request and why
+- How many of each device is needed
+- The topology pattern (star, hierarchical, ring, etc.)
+- VLAN, security, and redundancy considerations
+- Link-limit constraints being worked around
+
+### Output contract
+
+The LLM returns a two-key JSON envelope:
 
 ```json
 {
-  "gns3_version": "2.2.54",
-  "supports_iou": false,
-  "supports_qemu": true,
-  "supports_docker": false,
-  "strict_validation": true,
-  "require_template_image_map": false,
-  "template_image_map": {},
-  "security_profile": "enterprise"
+  "thinking": "Step 1: The user wants a campus network...\nStep 2: I'll use a Router-on-a-Stick pattern...",
+  "topology": {
+    "name": "Campus-Network",
+    "nodes": [...],
+    "connections": [...]
+  }
 }
 ```
 
-### CLI Arguments
+The `thinking` string is displayed to the user at the checkpoint. The `topology` object is passed through the existing Pydantic validation gates unchanged. If a model returns the topology at the top level (skipping the envelope), the parser falls back gracefully.
 
-| Argument | Short | Description |
-|----------|-------|-------------|
-| `--request` | `-r` | Network description (skips interactive prompt) |
-| `--output` | `-o` | Output JSON file path |
-| `--catalog` | | Path to custom appliance catalog JSON overlay |
-| `--profile` | | Path to preflight environment profile JSON |
-| `--security-profile` | | Apply security hardening: `none` \| `basic` \| `enterprise` |
-| `--no-phase2` | | Skip Phase 2 (software configuration generation) |
-| `--project-output` | | Output `.gns3project` path |
-| `--no-validate` | | Skip post-export structural validation |
-| `--configs` | | Export raw configs to directory for pre-GNS3 review |
-| `--yes` | | Auto-approve interactive checkpoints |
+The thinking text is also stored in `output/generation_report.json` under the `last_thinking` key for post-run analysis.
 
-### Preflight Profile JSON
+---
 
-The profile file allows non-interactive, backend/frontend-friendly runs:
+## Image Verification Manifest
+
+After Phase 1 hardware injection, `output/image_manifest.txt` is generated. It cross-references every node against the preflight profile's `template_image_map` and clearly states what is needed before import.
+
+### Example output
+
+```
+======================================================================
+  STRUCTRANET AI — IMAGE VERIFICATION MANIFEST
+======================================================================
+
+  Nodes: 8
+  Images in map: 2
+
+  Node ID      Name                 Template                  Status / Image File
+  ------------------------------------------------------------------
+  R1           R1-Main              Cisco 3745                ✓  c3745-adventerprisek9-mz.124-25d.image
+  R2           R2-Branch            Cisco 3745                ✓  c3745-adventerprisek9-mz.124-25d.image
+  Core-SW      Core-SW              Ethernet Switch           ✓  Built-in — no image required
+  F1-SW        F1-SW                Ethernet Switch           ✓  Built-in — no image required
+  PC1          PC1                  VPCS                      ✓  Built-in — no image required
+  ...
+
+  ✓  All appliance nodes have image mappings.
+======================================================================
+```
+
+If any appliance node's template name is not in the `template_image_map`, it is flagged with ⚠ and listed in a "MISSING IMAGE MAPPINGS" section at the bottom.
+
+A compact summary is also printed inline during the pipeline run so users don't need to open the file to see if there are issues.
+
+---
+
+## Rich Node Context
+
+Every node in the topology is enriched with metadata after hardware injection. This data is embedded directly in the node's `properties` dict under underscore-prefixed keys so it travels through the entire pipeline — including into the exported `final_topology.json` — without being touched by the Phase 2 safe-merge.
+
+### Enrichment fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `_interfaces` | `list[str]` | All canonical interface names (e.g. `["FastEthernet0/0", "FastEthernet0/1", "Serial1/0"]`) |
+| `_hardware_summary` | `str` | Compact slot/adapter summary (e.g. `platform=c3745 ram=128MB \| slot1=NM-1FE-TX`) |
+| `_image_required` | `bool` | `True` for appliance types (dynamips, iou, qemu, etc.), `False` for built-ins |
+| `_security_role` | `str` | Security role assigned by the LLM (e.g. `perimeter`, `core-switch`, `host`) |
+| `_zone` | `str` | Security zone (e.g. `OUTSIDE`, `INSIDE`, `DMZ`, `MANAGEMENT`) |
+| `_vlan_id` | `int` | VLAN ID for access switches (0 for routers/core) |
+| `_link_count` | `int` | Number of links connected to this node |
+
+These fields are intentionally outside `SOFTWARE_CONFIG_KEYS` so Phase 2 can never overwrite them. A UI inspector or frontend can read them directly from `final_topology.json` to show full node details when a user clicks on a node.
+
+---
+
+## Multi-Turn Chat History
+
+The `SessionState` dataclass carries the accumulated OpenAI message list across all Edit loop iterations:
+
+```python
+@dataclass
+class SessionState:
+    chat_history: List[Dict[str, str]]   # OpenAI message dicts
+    topology_dict: Optional[Dict]        # Last approved hardware-injected topology
+    thinking_text: str                   # Last CoT reasoning text
+    iteration: int                       # How many Phase 1 calls have run
+    last_request: str                    # Original user request (never mutated)
+```
+
+On every call to `generate_network_topology()`, the accumulated history is prepended to the LLM's message array:
+
+```
+[system prompt]
+[user: original request]              ← iteration 1
+[assistant: first topology JSON]      ← iteration 1
+[user: edit feedback]                 ← iteration 2
+[assistant: second topology JSON]     ← iteration 2
+[user: second edit feedback]          ← iteration 3
+...
+```
+
+This gives the LLM full context to refine rather than restart. The original request always anchors the conversation, and each piece of feedback builds on the previous design.
+
+---
+
+## Security Profiles
+
+Structranet AI includes three built-in security profiles selected via `--security-profile` or the preflight profile JSON.
+
+### Profile: "none" (Default)
+
+No security rules injected. Pure lab/universal mode.
+
+### Profile: "basic"
+
+Lightweight hardening applied to every router:
+
+- Mandatory NAT node for Internet edge
+- Dedicated management VPCS host
+- SSH v2, AAA, login rate-limiting
+- Syslog/NTP with standard servers
+- Service hardening and banner enforcement
+
+### Profile: "enterprise"
+
+Full security archetype:
+
+**Mandatory topology roles:** Perimeter Router (ZBF), Core Switch, DMZ Switch, Management Switch, SIEM, NAT-ISP, optional Secondary Router (HSRP)
+
+**VLAN segmentation** auto-detected from switch names:
+
+| Segment | VLAN | Switch name contains |
+|---------|------|---------------------|
+| Management | 10 | `MGMT` or `Mgmt` |
+| Users / LAN | 20 | `USER` or `LAN` |
+| Servers | 30 | `SRV` or `Server` |
+| VoIP | 40 | `VOIP` or `Voice` |
+| IoT | 50 | `IOT` |
+| DMZ | 60 | `DMZ` |
+| Guest | 100 | `GUEST` |
+| Native unused | 999 | trunk ports |
+
+**Config hardening per node role:** ZBF zones/policies, anti-spoofing ACLs, TCP intercept, OSPF MD5 auth, NAT PAT overload, HSRP with MD5, DHCP Snooping, DAI, port-security, storm-control, SNMPv3, loopback interfaces, NTP auth.
+
+### Preflight Profile JSON with security
 
 ```json
 {
@@ -361,38 +513,21 @@ The profile file allows non-interactive, backend/frontend-friendly runs:
   "strict_validation": true,
   "require_template_image_map": false,
   "template_image_map": {
-    "Cisco 3745": "c3745-adventerprisek9-mz.124-25d.image",
-    "Cisco 7200": "c7200-adventerprisek9-mz.124-24.T5.image"
+    "Cisco 3745": "c3745-adventerprisek9-mz.124-25d.image"
   },
-  "security_profile": "none"
+  "security_profile": "enterprise"
 }
 ```
-
-- When `require_template_image_map=true`, appliance nodes must use template names present in `template_image_map`.
-- During export, this map is passed to `gns3_exporter.convert(..., image_map=...)` to keep image selection deterministic.
-- `security_profile` can be `"none"`, `"basic"`, or `"enterprise"` (see Security Profiles section above)
-
-### Environment Variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `ROUTER_API_KEY` | *(required)* | OpenAI-compatible API key |
-| `ROUTER_BASE_URL` | *(required)* | LLM API base URL |
-| `AI_MODEL` | `openrouter/owl-alpha` | LLM model identifier |
-| `AI_MAX_TOKENS` | `8192` | Max tokens per LLM call |
-| `STRUCTRANET_OUTPUT_DIR` | `output` | Output directory for topology files |
 
 ---
 
 ## Supported Device Types
 
-Structranet AI supports all GNS3 node types with hardware-aware expansion:
-
 ### Routers (L3)
 
 | Type | Platforms | Expansion | Built-in Ports |
 |------|-----------|-----------|----------------|
-| **Dynamips** | c7200, c3745, c3725, c3660, c3640, c3620, c2691, c2600, c1700 | Slot-based modules (PA-8E, NM-4E, PA-4T+, NM-4T, etc.) | 0-2 per platform |
+| **Dynamips** | c7200, c3745, c3725, c3660, c3640, c3620, c2691, c2600, c1700 | Slot-based modules (PA-8E, NM-4E, PA-4T+, NM-4T, etc.) | 0–2 per platform |
 | **IOU** | IOU L3, IOU L2 | Count-based (`ethernet_adapters`, `serial_adapters`, 4 ports each) | — |
 | **QEMU** | CSR1000v, etc. | `adapters` integer (max 275) | — |
 | **Docker** | Custom containers | `adapters` integer (max 99) | — |
@@ -417,82 +552,56 @@ Structranet AI supports all GNS3 node types with hardware-aware expansion:
 
 ## Key Design Decisions
 
-### 1. LLM Only Designs, Code Assigns Ports
+### 1. Pause-and-Resume Loop Without an API Server
 
-The single largest source of deployment failures in previous versions was the LLM computing adapter/port numbers incorrectly. The current architecture strictly separates concerns:
+All state is carried in a single `SessionState` dataclass that is passed explicitly through the pipeline. There are no global variables and no external server required. The loop lives entirely in `main.py`'s `_checkpoint_loop()` function, which calls `generate_network_topology()` and reads user input in a `for` loop. This keeps the architecture simple, testable, and easy to extend into a web API later by replacing `input()` calls with HTTP request handlers.
 
-- **LLM**: Decides *what* connects to *what* (logical topology)
-- **Code**: Computes *where* on each device (adapter/port numbers) via `port_assigner.py`
+### 2. CoT Envelope — Thinking Separate from Validated Data
 
-This eliminates an entire class of bugs and reduces the LLM prompt from ~250 lines to ~80 lines.
+The LLM returns `{"thinking": "...", "topology": {...}}`. The `thinking` string is extracted and displayed but never passed to Pydantic. The `topology` object goes through all the same validation gates as before. This means CoT reasoning is purely additive — it cannot break existing validation behaviour regardless of what the model writes in the thinking field.
 
-### 2. Three-Gate Safe Merge
+### 3. LLM Only Designs, Code Assigns Ports
 
-Phase 2 (software config generation) merges LLM output into the topology with three safety gates:
+The single largest source of deployment failures in previous versions was the LLM computing adapter/port numbers incorrectly. This architecture strictly separates concerns: the LLM decides *what* connects to *what*; `port_assigner.py` computes *where* on each device.
 
-1. **Whitelist Gate**: Only `startup_config_content`, `startup_script`, `start_command`, and `environment` keys are allowed
-2. **No-Overwrite Gate**: Hardware properties (slots, adapters, ports_mapping) can never be overwritten
-3. **Type Gate**: Value types must match the expected type (string, dict, etc.)
+### 4. Underscore-Prefixed Metadata Keys
 
-This makes it **impossible** for the LLM to corrupt hardware configuration, regardless of what it generates.
+All node enrichment fields are prefixed with `_` (`_interfaces`, `_hardware_summary`, etc.). This convention ensures they are outside `SOFTWARE_CONFIG_KEYS` and will never be touched by Phase 2's Three-Gate Safe Merge. A UI inspector can read them directly from `final_topology.json` without any additional API calls.
 
-### 3. Deterministic Output
+### 5. Three-Gate Safe Merge
 
-The same topology JSON always produces the same `.gns3project` file:
+Phase 2 merges LLM output with three safety gates:
 
-- UUIDs are derived via UUID5 from (project_name, node_id) — not random
-- Canvas coordinates are computed from device role priority and sorted node IDs
-- Port assignments follow deterministic rules based on node type and link order
+1. **Whitelist Gate**: only `startup_config_content`, `startup_script`, `start_command`, and `environment` are accepted; keys starting with `_` are silently dropped
+2. **No-Overwrite Gate**: existing non-empty hardware properties can never be replaced
+3. **Type Gate**: value types must match expected types
 
-### 4. Single Source of Truth for Constants
+### 6. Deterministic Output
 
-The `constants/` package is the authoritative reference for shared constants:
+The same topology JSON always produces the same `.gns3project` file. UUIDs are derived via UUID5, canvas coordinates are computed from device role priority, and port assignments follow deterministic rules.
 
-- File format version/revision
-- Config file path mappings (software_key x node_type → filesystem path)
-- Visual defaults (symbols, console types, label styles)
-- Port name format per node type
-- Node type classifications (appliance, built-in, single-port, no-config)
-- Layout grid constants
+### 7. Single Source of Truth for Constants
 
-All values are verified against the GNS3 2.2 server source code.
-
-### 5. Offline-First Export
-
-The project pivoted from live GNS3 REST API deployment to offline `.gns3project` ZIP export. This means:
-
-- No running GNS3 server is required to generate topologies
-- Exported projects are fully portable and self-contained
-- The same topology can be shared, version-controlled, and imported on any GNS3 installation
-- Config files are embedded in the ZIP with correct GNS3 portable project paths
-
-### 6. Validated Against GNS3 Source Code
-
-Every constant in `constants/gns3.py`, every Dynamips module in `constants/hardware.py`/`hw_config.py`, and every slot compatibility rule has been verified against the actual GNS3 server source code (branch 2.2). This ensures:
-
-- Slot module names match exactly (e.g., `PA-8E`, `NM-4T`, `GT96100-FE`)
-- Port counts per module are accurate
-- Built-in interface counts per platform are correct
-- ZIP path formats match GNS3's portable project import logic (`project-files/<node_type>/<uuid>/`)
-- IOU `application_id` is assigned as a mandatory unique integer per node
-- IOU config files use the correct path (no `configs/` subdirectory)
+The `constants/` package is the authoritative reference. All values are verified against the GNS3 2.2 server source code.
 
 ---
+
+## Validation & Testing
 
 ### Structural Validator
 
 `gns3project_validator.py` performs 11 deep validation checks on any `.gns3project` file:
 
-1. ZIP structure (project.gns3 exists, file paths correct)
+1. ZIP structure
 2. JSON schema conformity (revision 9, required keys)
-3. Node validation (required fields, legal node types)
-4. Dynamips compatibility matrix (platform ↔ slot modules)
-5. Port reference integrity (link ports exist on referenced nodes)
-6. Config file path consistency (paths in properties match files in ZIP)
-7. Template ID format (null or valid UUID)
+3. Node validation
+4. Dynamips compatibility matrix
+5. Port reference integrity
+6. Config file path consistency
+7. Template ID format
 8. Compute cross-referencing
-9. Switch VLAN sanity (access VLANs 1-4094, trunk dot1q)
-10. Link integrity (no duplicates, no self-links)
+9. Switch VLAN sanity
+10. Link integrity
 11. UUID format validation
 
 ```bash
@@ -502,23 +611,21 @@ python gns3project_validator.py <file.gns3project> --verbose
 
 ### Golden End-to-End Test
 
-A regression test verifies export + validator against a known-good fixture:
-
 ```bash
 python -m unittest tests.test_golden_export
 ```
-
-This protects the core promise: generated `.gns3project` remains structurally importable.
 
 ### Post-Generation Report
 
 Each run writes `output/generation_report.json` containing:
 
-1. Request text and timestamp
-2. Effective preflight profile used
-3. Compatibility findings and design-review assumptions
-4. Output paths (`_topology.json`, `final_topology.json`, `.gns3project`)
-5. Validator result (skipped/pass/fail)
+- Request text and timestamp
+- Effective preflight profile
+- `phase1_iterations` — how many Edit loop rounds were needed
+- `last_thinking` — the final chain-of-thought text from the LLM
+- Compatibility findings
+- Output paths (phase1 JSON, final JSON, `.gns3project`, image manifest)
+- Validator result
 
 ---
 
@@ -528,24 +635,15 @@ The `.gns3project` export produces a GNS3 revision 9 portable project ZIP:
 
 ```
 my_network.gns3project
-├── project.gns3                                            # Main topology JSON
-├── project-files/dynamips/<uuid-1>/configs/startup-config.cfg  # Dynamips startup config
-├── project-files/dynamips/<uuid-1>/configs/private-config.cfg  # Dynamips private config
-├── project-files/iou/<uuid-2>/startup-config.cfg           # IOU startup config (no configs/ prefix)
-├── project-files/vpcs/<uuid-3>/startup.vpc                 # VPCS startup script
-└── project-files/<node_type>/<uuid-4>/                     # Node directory (for structure)
+├── project.gns3                                                   # Main topology JSON
+├── project-files/dynamips/<uuid>/configs/startup-config.cfg      # Dynamips startup config
+├── project-files/dynamips/<uuid>/configs/private-config.cfg      # Dynamips private config
+├── project-files/iou/<uuid>/startup-config.cfg                   # IOU startup config
+├── project-files/vpcs/<uuid>/startup.vpc                         # VPCS startup script
+└── project-files/<node_type>/<uuid>/                             # Node directory
 ```
 
-The `project.gns3` JSON follows the exact schema that GNS3 produces when exporting portable projects, including:
-
-- Deterministic UUID5 node/link IDs
-- Canvas coordinates grouped by device role (routers center, switches above/below, hosts at periphery)
-- Inline config content stripped and moved to ZIP files with correct `project-files/<node_type>/<uuid>/` paths
-- Path references (`startup_config`, `private_config`) left in properties
-- `template_id: null` for portable offline projects
-- `status: "stopped"`, `console_auto_start: false` for clean import
-- IOU nodes with unique `application_id` integer fields
-- Dynamic label y-position computation matching GNS3's actual formula
+Node properties in `project.gns3` include the full enrichment metadata (`_interfaces`, `_hardware_summary`, etc.) so any tool that reads the JSON can display complete node information without additional lookups.
 
 ---
 
@@ -553,68 +651,47 @@ The `project.gns3` JSON follows the exact schema that GNS3 produces when exporti
 
 ### Appliance Catalog
 
-The built-in appliance catalog (`appliance_catalog.py`) defines mandatory creation properties for each supported device:
-
-| Appliance | Type | Key Properties |
-|-----------|------|----------------|
-| Cisco 7200 | dynamips | platform=c7200, ram=512, slot0=PA-FE-TX |
-| Cisco 3745 | dynamips | platform=c3745, ram=256, slot0=GT96100-FE |
-| IOU L3 | iou | ethernet_adapters=2, serial_adapters=0 |
-| IOU L2 | iou | ethernet_adapters=1, slot0=l2 |
-| VPCS | vpcs | console_type=telnet |
-| Ethernet Switch | ethernet_switch | console_type=none |
-| Ethernet Hub | ethernet_hub | — |
-
-Users can override or extend the catalog by providing a JSON overlay file:
+The built-in appliance catalog (`appliance_catalog.py`) defines mandatory creation properties for each supported device. Users can override or extend it by providing a JSON overlay:
 
 ```python
 from appliance_catalog import load_catalog
-
 catalog = load_catalog("my_custom_appliances.json")
 ```
 
-### Dynamips Module Catalogue
+### Environment Variables
 
-`hw_config.py` maintains a complete catalogue of Dynamips expansion modules:
-
-**Ethernet modules:** PA-8E (8 ports), PA-4E (4 ports), PA-FE-TX (1 port), NM-4E (4 ports), NM-1E (1 port), GT96100-FE (2 ports)
-
-**Serial modules:** PA-4T+ (4 ports), PA-8T (8 ports), NM-4T (4 ports)
-
-The hardware injector automatically selects the correct module type based on whether a link is Ethernet or serial, and computes how many slots are needed to satisfy the link count.
-
-### IOU Configuration
-
-IOU (IOS on Unix) nodes use a different expansion model from Dynamips:
-
-- Each IOU adapter provides exactly **4 ports** (`IOU_PORTS_PER_ADAPTER = 4`)
-- Expansion is count-based: `ethernet_adapters` and `serial_adapters` are integer properties
-- Maximum 16 adapters per type (`IOU_MAX_ADAPTERS = 16`)
-- Each IOU node requires a unique `application_id` integer
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ROUTER_API_KEY` | *(required)* | OpenAI-compatible API key |
+| `ROUTER_BASE_URL` | *(required)* | LLM API base URL |
+| `AI_MODEL` | `openrouter/owl-alpha` | LLM model identifier |
+| `AI_MAX_TOKENS` | `8192` | Max tokens per LLM call |
+| `STRUCTRANET_OUTPUT_DIR` | `output` | Output directory for topology files |
 
 ---
 
 ## Known Issues & Roadmap
 
-### Recently Completed (V3.3+)
+### Completed in V4.0
 
-- ✅ **Security profiles** ("none", "basic", "enterprise") — topology and config hardening rules injected via LLM prompts
+- ✅ **Interactive Phase 1 checkpoint loop** — pause, display thinking, Edit or Continue
+- ✅ **Chain-of-Thought reasoning** — LLM reasons before generating; displayed at checkpoint
+- ✅ **Multi-turn chat history** — Edit feedback preserved across iterations; LLM refines not restarts
+- ✅ **Rich node context** — `_interfaces`, `_hardware_summary`, `_security_role`, `_zone`, `_link_count` on every node
+- ✅ **Image verification manifest** — `image_manifest.txt` cross-references every appliance against preflight image map
+- ✅ **Security profiles** ("none", "basic", "enterprise")
 - ✅ **LLM utilities consolidation** — `llm_utils.py` is SSOT for client, retry, JSON extraction
-- ✅ **Constants SSOT** — `constants/` package is authoritative; no more drift
-- ✅ **Config review export** — `--configs DIR` exports raw configs for pre-GNS3 review
-- ✅ **VLAN patching guarantee** — `topology_finalizer.apply_switch_port_patches()` runs even with `--no-phase2`
-
-### Pending Code Fixes (Phase 4+)
-
-Most previously documented constant-drift issues were resolved by migrating shared values to `constants/`.
-
-Remaining work should focus on behavior-level hardening (integration tests, broader fixture coverage, and any platform-specific edge cases uncovered during validation).
+- ✅ **Constants SSOT** — `constants/` package is authoritative
+- ✅ **VLAN patching guarantee** — `apply_switch_port_patches()` runs even with `--no-phase2`
 
 ### Planned Improvements
 
-- **Remove dead code**: Delete any unused legacy modules (live deployment remnants if present)
-- **Expand security profiles**: Add more specialized archetypes (e.g., "industrial", "healthcare")
-- **Topology edit mode UI**: Interactive editing of existing topologies via natural language (logic in `ai_agent.py`, needs UI)
+- **Web API mode** — replace `input()` with HTTP endpoints; `SessionState` is already serialization-ready
+- **Session persistence** — serialize `SessionState` to disk so Edit loops survive process restarts
+- **Topology diff display** — show a before/after diff at the checkpoint instead of the full table after each Edit
+- **Topology visualizer** — render the draft topology as an ASCII or SVG diagram at the checkpoint
+- **Expand security profiles** — add "industrial", "healthcare", and "cloud-edge" archetypes
+- **Broader test fixtures** — integration tests covering multi-VLAN, serial WAN, and enterprise security topologies
 
 ---
 

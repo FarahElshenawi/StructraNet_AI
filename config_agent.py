@@ -12,66 +12,65 @@ Pipeline:
   5. Save final integrated topology
 
 Safety guarantee: The whitelist merge makes it IMPOSSIBLE for the LLM to
-overwrite hardware properties (slots, adapters, ports_mapping), regardless
-of what it returns.
+overwrite hardware properties (slots, adapters, ports_mapping) OR the
+underscore-prefixed metadata keys added by ai_agent._enrich_nodes(),
+regardless of what the LLM returns.
 
-
-Changes vs V2.0:
-  - _build_phase2_prompt() now accepts security_profile and prepends
-    get_config_security_prompt() output before the existing rules block.
-  - run_phase2() accepts and forwards security_profile.
-  - Everything else (Three-Gate Safe Merge, Pydantic re-validation,
-    file save) is identical to V2.0.
+V4.0 notes (no API changes vs V3.3):
+  - The Phase 2 prompt now explicitly instructs the LLM to skip any key
+    that starts with "_" — these are internal metadata keys.
+  - run_phase2() signature is unchanged; callers (main.py) pass
+    security_profile as before.
+  - generate_software_configs() and safe_merge_configs() are unchanged.
 """
 
-import os
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
- 
+
 from dotenv import load_dotenv
- 
-from constants.phase2 import ALLOWED_VALUE_TYPES, SOFTWARE_CONFIG_KEYS
+
 from constants.gns3 import VLAN_PATCHED_KEY
+from constants.phase2 import ALLOWED_VALUE_TYPES, SOFTWARE_CONFIG_KEYS
 from context_builder import build_configuration_brief
 from llm_utils import _call_with_retry, _extract_json, _get_client
-from security_prompts import get_config_security_prompt         # NEW import
-from topology_finalizer import apply_switch_port_patches
 from schema import GNS3Project
- 
+from security_prompts import get_config_security_prompt
+from topology_finalizer import apply_switch_port_patches
+
 load_dotenv()
 logger = logging.getLogger("structranet.config_agent")
- 
-ROUTER_BASE_URL = os.getenv("ROUTER_BASE_URL")
-DEFAULT_MODEL   = os.getenv("AI_MODEL", "openrouter/owl-alpha")
-MAX_TOKENS      = int(os.getenv("AI_MAX_TOKENS", "8192"))
- 
- 
+
+DEFAULT_MODEL = os.getenv("AI_MODEL", "openrouter/owl-alpha")
+MAX_TOKENS = int(os.getenv("AI_MAX_TOKENS", "8192"))
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  Prompt builder
 # ══════════════════════════════════════════════════════════════════════════════
- 
+
 def _build_phase2_prompt(
     brief: str,
-    security_profile: str = "none",        # NEW parameter
+    security_profile: str = "none",
 ) -> str:
-    # ── Security block injected at the top so it is parsed first (NEW) ──────
     security_block = get_config_security_prompt(security_profile)
- 
+
     return f"""{security_block}
 You are the Software Configuration Agent for Structranet AI.
 Your job is to generate IP addressing, routing, and startup configurations
 for the network topology described in the brief below.
- 
+
 {brief}
- 
+
 OUTPUT FORMAT:
 Return a JSON object where:
   - Keys are node_id values from the brief (e.g., "R1", "PC1")
   - Values are objects containing ONLY software config properties
   - Do NOT include nodes that need no config (switches, hubs, NAT, cloud)
- 
+  - Do NOT include any key that starts with "_" — those are internal metadata keys
+
 Example output (Router-on-a-Stick with 3 VLANs):
 {{
   "R1": {{
@@ -81,21 +80,21 @@ Example output (Router-on-a-Stick with 3 VLANs):
     "startup_script": "ip 10.0.10.10/24 10.0.10.1\\nsave\\n"
   }}
 }}
- 
+
 CONFIG KEY RULES (use EXACTLY these property names):
   - dynamips / iou / qemu routers → "startup_config_content" (Cisco IOS string)
   - vpcs hosts                    → "startup_script" (NOT startup_script_content!)
   - docker containers             → "start_command" + "environment"
- 
+
 ══════════════════════════════════════════════════════════════
   GENERALIZED L3 ARCHITECTURE RULES
 ══════════════════════════════════════════════════════════════
- 
+
 Rule A — ONE SUBNET PER BROADCAST DOMAIN / ACCESS SWITCH
   Every distinct access switch MUST be assigned its own unique VLAN
   and its own unique /24 subnet. NEVER place two access switches or
   their end-devices in the same subnet.
- 
+
 Rule B — ROUTER-ON-A-STICK (802.1Q SUB-INTERFACES)
   When a single router connects to multiple access switches through a
   core switch, configure 802.1Q sub-interfaces:
@@ -103,57 +102,59 @@ Rule B — ROUTER-ON-A-STICK (802.1Q SUB-INTERFACES)
       encapsulation dot1Q 10
       ip address 10.0.10.1 255.255.255.0
   Sub-interface number MUST match VLAN ID.
- 
+
 Rule C — VPCS GATEWAYS MUST MATCH THEIR VLAN SUB-INTERFACE
   Every VPCS host must use the router sub-interface IP for its VLAN
   as the default gateway. NEVER use the same gateway for hosts on
   different VLANs.
- 
+
 Rule D — SUBNET ALLOCATION
   Use structured allocation: VLAN ID maps to third octet.
     VLAN 10 → 10.0.10.0/24   Router sub-iface IP: .1   Hosts from .10
     VLAN 20 → 10.0.20.0/24
     VLAN 30 → 10.0.30.0/24
   (Override with security profile address space if profile != "none".)
- 
+
 Rule E — SIMPLE NETWORK EXCEPTION
   If the brief states this is a "simple single-department network" or
   there is only ONE access switch, a flat subnet is acceptable and
   Router-on-a-Stick is NOT required.
- 
+
 ══════════════════════════════════════════════════════════════
- 
+
 STRICT RULES:
 1. ONLY use the config keys listed above. Any other key will be REJECTED.
 2. Do NOT include "slot1", "adapters", "ports_mapping", "platform", "ram",
    or any hardware property.
-3. Do NOT include "name", "node_type", "template_name", "compute_id".
-4. Use the EXACT interface names from the brief.
-5. Each segment gets one unique subnet.
-5a. ALL devices on the same multi-access segment MUST share the SAME
+3. Do NOT include keys starting with "_" (these are internal metadata).
+4. Do NOT include "name", "node_type", "template_name", "compute_id".
+5. Use the EXACT interface names from the brief.
+6. Each segment gets one unique subnet.
+6a. ALL devices on the same multi-access segment MUST share the SAME
     subnet and SAME mask.
-6. Include routing protocols (OSPF or static routes) for multi-segment
+7. Include routing protocols (OSPF or static routes) for multi-segment
    routers.
-7. Do NOT include markdown code fences. Return ONLY raw JSON.
-8. The JSON must start with '{{' and end with '}}'.
-9. Skip switches, hubs, NAT, and cloud nodes — no IP config needed."""
- 
- 
+8. Do NOT include markdown code fences. Return ONLY raw JSON.
+9. The JSON must start with '{{' and end with '}}'.
+10. Skip switches, hubs, NAT, and cloud nodes — no IP config needed."""
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  LLM call
 # ══════════════════════════════════════════════════════════════════════════════
- 
+
 def generate_software_configs(
     brief: str,
-    security_profile: str = "none",        # NEW parameter
+    security_profile: str = "none",
 ) -> Optional[Dict[str, Dict[str, Any]]]:
     client = _get_client()
     prompt = _build_phase2_prompt(brief, security_profile=security_profile)
     logger.info(
         "Calling Phase 2 LLM (model=%s, security_profile=%s) ...",
-        DEFAULT_MODEL, security_profile,
+        DEFAULT_MODEL,
+        security_profile,
     )
- 
+
     # Strategy 1: JSON mode
     try:
         def _json_call():
@@ -161,35 +162,41 @@ def generate_software_configs(
                 model=DEFAULT_MODEL,
                 messages=[
                     {"role": "system", "content": prompt},
-                    {"role": "user",   "content": "Generate the software configurations now."},
+                    {"role": "user", "content": "Generate the software configurations now."},
                 ],
                 max_tokens=MAX_TOKENS,
                 response_format={"type": "json_object"},
             )
- 
+
         response = _call_with_retry(_json_call)
         if response and response.choices:
-            raw_text   = response.choices[0].message.content or ""
+            raw_text = response.choices[0].message.content or ""
             clean_text = _extract_json(raw_text)
-            configs    = json.loads(clean_text)
- 
+            configs = json.loads(clean_text)
+
             if not isinstance(configs, dict):
-                logger.error("LLM returned non-dict top-level: %s", type(configs).__name__)
+                logger.error(
+                    "LLM returned non-dict top-level: %s", type(configs).__name__
+                )
                 return None
- 
+
             for nid, cfg in configs.items():
                 if not isinstance(cfg, dict):
                     logger.error(
-                        "LLM returned non-dict for node '%s': %s", nid, type(cfg).__name__
+                        "LLM returned non-dict for node '%s': %s",
+                        nid,
+                        type(cfg).__name__,
                     )
                     return None
- 
-            logger.info("Phase 2 LLM succeeded — configs for %d node(s)", len(configs))
+
+            logger.info(
+                "Phase 2 LLM succeeded — configs for %d node(s)", len(configs)
+            )
             return configs
- 
+
     except Exception as e:
         logger.warning("Phase 2 JSON mode failed: %s", e)
- 
+
     # Strategy 2: plain text fallback
     logger.info("Retrying Phase 2 without response_format...")
     raw_text = ""
@@ -199,45 +206,60 @@ def generate_software_configs(
                 model=DEFAULT_MODEL,
                 messages=[
                     {"role": "system", "content": prompt},
-                    {"role": "user",   "content": "Generate the software configurations now. Return ONLY raw JSON."},
+                    {
+                        "role": "user",
+                        "content": "Generate the software configurations now. Return ONLY raw JSON.",
+                    },
                 ],
                 max_tokens=MAX_TOKENS,
             )
- 
+
         response = _call_with_retry(_plain_call)
         if response and response.choices:
-            raw_text   = response.choices[0].message.content or ""
+            raw_text = response.choices[0].message.content or ""
             clean_text = _extract_json(raw_text)
-            configs    = json.loads(clean_text)
- 
+            configs = json.loads(clean_text)
+
             if isinstance(configs, dict):
                 logger.info(
                     "Phase 2 plain fallback succeeded — configs for %d node(s)",
                     len(configs),
                 )
                 return configs
- 
+
     except Exception as e:
         logger.error("Phase 2 plain fallback also failed: %s", e)
-        logger.error("\n%s\nRAW AI OUTPUT:\n%s\n%s", "=" * 40, raw_text, "=" * 40)
- 
+        logger.error(
+            "\n%s\nRAW AI OUTPUT:\n%s\n%s", "=" * 40, raw_text, "=" * 40
+        )
+
     return None
- 
- 
+
+
 # ══════════════════════════════════════════════════════════════════════════════
-#  Three-Gate Safe Merge  (unchanged from V2.0)
+#  Three-Gate Safe Merge
 # ══════════════════════════════════════════════════════════════════════════════
- 
+
 def safe_merge_configs(
     phase1_dict: Dict[str, Any],
     llm_configs: Dict[str, Dict[str, Any]],
 ) -> Tuple[Dict[str, Any], Dict[str, List[str]]]:
-    topology  = phase1_dict.get("topology", phase1_dict)
-    nodes     = topology.get("nodes", [])
-    node_index: Dict[str, dict] = {n.get("node_id"): n for n in nodes if n.get("node_id")}
+    """Merge LLM-generated software configs into the Phase 1 topology dict.
+
+    Gate 1 — Whitelist: only keys in SOFTWARE_CONFIG_KEYS are accepted.
+             Any key starting with "_" is also silently dropped here even
+             if it somehow appeared in the LLM output.
+    Gate 2 — No-overwrite: existing non-empty values are never replaced.
+    Gate 3 — Type check: value must match the expected Python type.
+    """
+    topology = phase1_dict.get("topology", phase1_dict)
+    nodes = topology.get("nodes", [])
+    node_index: Dict[str, dict] = {
+        n.get("node_id"): n for n in nodes if n.get("node_id")
+    }
     rejection_log: Dict[str, List[str]] = {}
     merged_count = 0
- 
+
     for node_id, config in llm_configs.items():
         node = node_index.get(node_id)
         if node is None:
@@ -245,17 +267,26 @@ def safe_merge_configs(
                 f"Node '{node_id}' not found in topology — entire config skipped"
             )
             continue
- 
+
         properties = node.setdefault("properties", {})
- 
+
         for key, value in config.items():
+            # Silently drop internal metadata keys regardless of source
+            if key.startswith("_"):
+                logger.debug(
+                    "MERGE SKIP: %s.%s — internal metadata key ignored", node_id, key
+                )
+                continue
+
             # Gate 1: whitelist
             if key not in SOFTWARE_CONFIG_KEYS:
                 reason = f"Key '{key}' rejected — not in whitelist"
                 rejection_log.setdefault(node_id, []).append(reason)
-                logger.warning("MERGE REJECT [Gate 1]: %s.%s — %s", node_id, key, reason)
+                logger.warning(
+                    "MERGE REJECT [Gate 1]: %s.%s — %s", node_id, key, reason
+                )
                 continue
- 
+
             # Gate 2: no-overwrite (with empty-placeholder exception)
             if key in properties:
                 existing_val = properties[key]
@@ -265,13 +296,16 @@ def safe_merge_configs(
                         f"{repr(existing_val)[:80]}"
                     )
                     rejection_log.setdefault(node_id, []).append(reason)
-                    logger.warning("MERGE REJECT [Gate 2]: %s.%s — %s", node_id, key, reason)
+                    logger.warning(
+                        "MERGE REJECT [Gate 2]: %s.%s — %s", node_id, key, reason
+                    )
                     continue
                 logger.info(
                     "MERGE ALLOW [Gate 2 relaxed]: %s.%s — empty placeholder, allowing overwrite",
-                    node_id, key,
+                    node_id,
+                    key,
                 )
- 
+
             # Gate 3: type check
             allowed_types = ALLOWED_VALUE_TYPES.get(key, (str,))
             if not isinstance(value, allowed_types):
@@ -280,31 +314,36 @@ def safe_merge_configs(
                     f"not in {tuple(t.__name__ for t in allowed_types)}"
                 )
                 rejection_log.setdefault(node_id, []).append(reason)
-                logger.warning("MERGE REJECT [Gate 3]: %s.%s — %s", node_id, key, reason)
+                logger.warning(
+                    "MERGE REJECT [Gate 3]: %s.%s — %s", node_id, key, reason
+                )
                 continue
- 
+
             properties[key] = value
             merged_count += 1
-            logger.debug("MERGE OK: %s.%s (%d chars)", node_id, key, len(str(value)))
- 
+            logger.debug(
+                "MERGE OK: %s.%s (%d chars)", node_id, key, len(str(value))
+            )
+
     logger.info(
         "Safe merge complete: %d key(s) merged, %d node(s) with rejections",
-        merged_count, len(rejection_log),
+        merged_count,
+        len(rejection_log),
     )
     return phase1_dict, rejection_log
- 
- 
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  Public API — Full Phase 2 Pipeline
 # ══════════════════════════════════════════════════════════════════════════════
- 
+
 def run_phase2(
     phase1_json_path: str,
     output_path: str = "output/final_topology.json",
-    security_profile: str = "none",        # NEW parameter
+    security_profile: str = "none",
 ) -> Optional[Dict[str, Any]]:
     """Execute the complete Phase 2 pipeline.
- 
+
     Parameters
     ----------
     phase1_json_path : str
@@ -318,33 +357,35 @@ def run_phase2(
     if not p1_path.exists():
         logger.error("Phase 1 JSON not found: %s", phase1_json_path)
         return None
- 
+
     with open(p1_path, encoding="utf-8") as f:
         phase1_dict = json.load(f)
- 
+
     # VLAN patch guard
     if not phase1_dict.get(VLAN_PATCHED_KEY):
         apply_switch_port_patches(phase1_dict)
         logger.info("Switch port patches applied")
     else:
         logger.info("Switch port patches already applied — skipping")
- 
+
     brief = build_configuration_brief(phase1_dict)
     logger.info("Configuration brief: %d chars", len(brief))
- 
+
     llm_configs = generate_software_configs(brief, security_profile=security_profile)
     if llm_configs is None:
-        logger.error("LLM failed to generate software configs — aborting Phase 2")
+        logger.error(
+            "LLM failed to generate software configs — aborting Phase 2"
+        )
         return None
- 
+
     merged_dict, rejection_log = safe_merge_configs(phase1_dict, llm_configs)
- 
+
     if rejection_log:
         logger.warning("Some LLM configs were rejected:")
         for nid, reasons in rejection_log.items():
             for reason in reasons:
                 logger.warning("  %s: %s", nid, reason)
- 
+
     try:
         validated = GNS3Project.model_validate(merged_dict)
         logger.info("Pydantic re-validation passed")
@@ -354,26 +395,31 @@ def run_phase2(
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps(merged_dict, indent=2), encoding="utf-8")
         return None
- 
+
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(validated.model_dump_json(indent=2), encoding="utf-8")
     logger.info("Final topology saved to %s", output_path)
     return validated.model_dump()
- 
- 
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  CLI entry point
 # ══════════════════════════════════════════════════════════════════════════════
- 
+
 if __name__ == "__main__":
     import sys
-    logging.basicConfig(level=logging.INFO, format="%(name)s [%(levelname)s] %(message)s")
- 
-    phase1_path    = sys.argv[1] if len(sys.argv) > 1 else "output/_topology.json"
-    output_file    = sys.argv[2] if len(sys.argv) > 2 else "output/final_topology.json"
-    sec_profile    = sys.argv[3] if len(sys.argv) > 3 else "none"
- 
+
+    logging.basicConfig(
+        level=logging.INFO, format="%(name)s [%(levelname)s] %(message)s"
+    )
+
+    phase1_path = sys.argv[1] if len(sys.argv) > 1 else "output/_topology.json"
+    output_file = (
+        sys.argv[2] if len(sys.argv) > 2 else "output/final_topology.json"
+    )
+    sec_profile = sys.argv[3] if len(sys.argv) > 3 else "none"
+
     result = run_phase2(phase1_path, output_file, security_profile=sec_profile)
     if result:
         print("\n=== Phase 2 Complete ===\n")
