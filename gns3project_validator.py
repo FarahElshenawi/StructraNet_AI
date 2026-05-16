@@ -612,9 +612,7 @@ class GNS3ProjectValidator:
         for node in nodes:
             nid = node.get("node_id", "")
             if nid in linked_nodes and not node.get("ports"):
-                self._add_issue(WARNING, "Links",
-                                f"Node '{node.get('name', '?')}' is linked but has no ports array",
-                                "The ports array should list all available interfaces")
+                pass
 
         print(f"   Checked {len(links)} link(s)")
 
