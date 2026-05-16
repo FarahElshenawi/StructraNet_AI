@@ -85,19 +85,18 @@ Structranet AI uses a **two-phase pipeline** that separates logical design from 
 
 ## Pipeline
 
-The full CLI pipeline now runs in 7 steps:
+The full CLI pipeline now runs in 6 steps:
 
 | Step | Module | Description |
 |------|--------|-------------|
-| 1/7 | User input | CLI argument or interactive prompt |
-| 2/7 | `preflight` | Load/collect environment profile (GNS3 version + supported node families) |
-| 3/7 | `ai_agent` | LLM generates `TopologyRequest` (nodes + logical connections), constrained by profile support |
-| 4/7 | `port_assigner` → `hw_config` | Deterministic port assignment + hardware slot injection |
-| 5/7 | `config_agent` | LLM generates software configs (IPs, routing, startup scripts); includes VLAN switch-port patching via `topology_finalizer` |
-| 6/7 | `gns3_exporter` | Convert final topology JSON to portable `.gns3project` ZIP |
-| 7/7 | `gns3project_validator` | Run 11 structural checks to ensure import safety |
+| 1/6 | Load catalog | Load built-in + custom appliance definitions |
+| 2/6 | User input + Preflight | CLI argument or interactive prompt; collect environment profile (GNS3 version + supported node families + security profile) |
+| 3/6 | `ai_agent` | LLM generates `TopologyRequest` (nodes + logical connections), constrained by profile support; security rules injected if profile != "none" |
+| 4/6 | `port_assigner` → `hw_config` → `topology_finalizer` | Deterministic port assignment + hardware slot injection + VLAN switch-port patching |
+| 5/6 | `config_agent` | LLM generates software configs (IPs, routing, startup scripts); security hardening applied if profile != "none" |
+| 6/6 | `gns3_exporter` → `gns3project_validator` | Convert final topology JSON to portable `.gns3project` ZIP; run 11 structural checks to ensure import safety |
 
-Before phase 2 and before final export, `main.py` presents a review checkpoint so the user can approve or stop.
+Before phase 2 and before final export, `main.py` presents review checkpoints so the user can approve or stop.
 
 ---
 
@@ -105,25 +104,29 @@ Before phase 2 and before final export, `main.py` presents a review checkpoint s
 
 ```
 structranet-ai/
-├── main.py                     # Grand orchestrator — 7-step CLI pipeline
+├── main.py                     # Grand orchestrator — 6-step CLI pipeline
 │
-├── preflight.py                # Environment profile collection + compatibility gate
+├── preflight.py                # Environment profile collection + compatibility gate + security profile
 │
-├── ai_agent.py                 # Phase 1: LLM topology generation + edit mode
-├── config_agent.py             # Phase 2: LLM software config generation
+├── ai_agent.py                 # Phase 1: LLM topology generation (with optional security rules injection)
+├── config_agent.py             # Phase 2: LLM software config generation (with optional security hardening)
+├── security_prompts.py         # Security profile prompt injection (none/basic/enterprise)
 ├── schema.py                   # Pydantic models (TopologyRequest, GNS3Project, etc.)
 │
 ├── port_assigner.py            # Deterministic adapter/port number assignment
 ├── hw_config.py                # Hardware injection (slots, adapters, ports_mapping)
 ├── topology_finalizer.py       # VLAN switch port patching (trunk/access)
 ├── context_builder.py          # Configuration brief builder + port name resolution
+├── llm_utils.py                # Shared LLM utilities (client, retry logic, JSON extraction)
 │
 ├── constants/                  # Shared constants package (single source of truth)
 │   ├── gns3.py                 # GNS3 format constants
-│   ├── hardware.py             # Hardware and node-type constants
+│   ├── hardware.py             # Hardware and node-type constants (SSOT)
 │   ├── appliances.py           # Built-in appliance catalog constants
 │   ├── phase2.py               # Phase 2 safe-merge constants
-│   └── ai.py                   # AI pipeline constants (retry/limits)
+│   ├── ai.py                   # AI pipeline constants (retry/limits)
+│   ├── validation.py           # Validation constants (backward-compat re-exports)
+│   └── __init__.py             # Constants package init
 ├── appliance_catalog.py        # Static appliance definitions (Cisco 7200, IOU, VPCS, etc.)
 │
 ├── gns3_exporter.py            # .gns3project ZIP archive packaging + verification
@@ -135,11 +138,13 @@ structranet-ai/
 │   └── fixtures/
 │       └── golden_minimal_topology.json
 │
+├── requirements.txt            # Python dependencies
 └── output/                     # Generated topology files
     ├── _topology.json          # Phase 1 output (hardware-injected)
     ├── final_topology.json     # Phase 2 output (software configs merged)
     ├── preflight_profile.json  # Saved environment profile
-    └── generation_report.json  # Structured per-run report
+    ├── generation_report.json  # Structured per-run report
+    └── configs_review/         # Optional raw config export for pre-GNS3 review
 ```
 
 ### Module Responsibilities
@@ -147,20 +152,23 @@ structranet-ai/
 | Module | Role | Key Functions |
 |--------|------|---------------|
 | `main.py` | Entry point & pipeline orchestration | `parse_args()`, `catalog_to_inventory()`, `main()` |
-| `preflight.py` | Environment readiness checks | `collect_profile_interactive()`, `check_topology_compatibility()` |
-| `ai_agent.py` | LLM topology design | `generate_network_topology()`, `process_and_save_topology()`, `generate_edited_topology()` |
-| `config_agent.py` | LLM config generation | `run_phase2()`, `safe_merge_configs()` (Three-Gate Safe Merge) |
+| `preflight.py` | Environment readiness checks + security profile | `collect_profile_interactive()`, `check_topology_compatibility()`, `filter_inventory_by_profile()` |
+| `ai_agent.py` | LLM topology design (with security injection) | `generate_network_topology()`, `process_and_save_topology()`, `_build_step1_prompt()` (now accepts security_profile) |
+| `config_agent.py` | LLM config generation (with security hardening) | `run_phase2()`, `safe_merge_configs()`, `generate_software_configs()` (now accepts security_profile) |
+| `security_prompts.py` | Security profile prompt templates | `get_topology_security_prompt()`, `get_config_security_prompt()` |
 | `schema.py` | Data contracts | `TopologyRequest`, `GNS3Project`, `validate_topology()`, `validate_topology_request()` |
 | `port_assigner.py` | Port number math | `assign_ports()`, `build_topology_from_request()` |
 | `hw_config.py` | Hardware expansion | `inject_hardware_config()` — Dynamips slots, IOU adapters, QEMU adapters, switch ports_mapping |
 | `topology_finalizer.py` | VLAN switching | `apply_switch_port_patches()` — trunk/access/dot1q port rewrites |
 | `context_builder.py` | LLM context builder | `build_configuration_brief()`, `resolve_port_name()`, `build_segments()` |
+| `llm_utils.py` | Shared LLM utilities (SSOT) | `_get_client()`, `_call_with_retry()`, `_extract_json()` |
 | `constants/gns3.py` | Shared GNS3 constants | `GNS3_REVISION`, `FILE_CONFIG_TRIPLETS`, `SYMBOL`, `PORT_NAME_FORMAT`, etc. |
-| `constants/hardware.py` | Shared hardware constants | Dynamips module tables, adapter limits, node type sets |
+| `constants/hardware.py` | Shared hardware constants (SSOT) | Dynamips module tables, adapter limits, node type sets, compatibility matrix |
 | `constants/phase2.py` | Phase 2 merge constants | `SOFTWARE_CONFIG_KEYS`, `ALLOWED_VALUE_TYPES` |
 | `constants/ai.py` | AI generation constants | `MAX_RETRIES`, prompt-side link-limit tables |
 | `constants/appliances.py` | Appliance defaults constants | `APPLIANCE_CATALOG` |
-| `appliance_catalog.py` | Template defaults | `get_appliance()`, `load_catalog()` with user overlay support |
+| `constants/validation.py` | Validation re-exports | Backward-compatible re-exports from hardware.py & gns3.py |
+| `appliance_catalog.py` | Template defaults loader | `get_appliance()`, `load_catalog()` with user overlay support |
 | `gns3_exporter.py` | ZIP packaging | `convert()` |
 | `gns3project_validator.py` | Deep validation | `GNS3ProjectValidator` — 11 structural checks against GNS3 spec |
 
@@ -200,6 +208,12 @@ EOF
 # Generate, export, and validate .gns3project
 python main.py --request "Build a campus network with 2 routers, a core switch, 3 access switches, and 9 PCs across 3 VLANs"
 
+# With security hardening (basic: SSH, AAA, NTP, Syslog)
+python main.py --request "3-router topology" --security-profile basic
+
+# Enterprise security (ZBF, ACLs, DAI, DHCP Snooping, SNMPv3, redundancy, HSRP)
+python main.py --request "enterprise network" --security-profile enterprise
+
 # Skip Phase 2 (software configs)
 python main.py --request "3-router topology" --no-phase2
 
@@ -208,6 +222,9 @@ python main.py --request "3-router topology" --project-output output/my_lab.gns3
 
 # Skip validator (not recommended)
 python main.py --request "3-router topology" --no-validate
+
+# Export raw configs for pre-GNS3 review
+python main.py --request "3-router topology" --configs ./config_review
 
 # Use a saved preflight profile (non-interactive environment info)
 python main.py --request "3-router topology" --profile output/preflight_profile.json
@@ -233,7 +250,88 @@ print(f"Exported to: {path}")
 
 ---
 
-## Usage
+## Security Profiles
+
+Structranet AI includes **three built-in security profiles** that automatically harden topologies and configurations. Profiles are selected during preflight or via the `--security-profile` CLI flag.
+
+### Profile: "none" (Default)
+
+- No security rules injected
+- Pure lab/universal mode
+- LLM designs topology without architectural constraints
+- Configs contain only IP addressing and basic routing
+- **Use case**: Educational labs, proof-of-concept builds, testing
+
+### Profile: "basic"
+
+Applies lightweight security hardening to every router:
+
+**Topology rules**:
+- Mandatory NAT node for Internet edge (`NAT-ISP`)
+- Dedicated management VPCS host (`MGMT-PC` or `Admin-PC`)
+- All hosts connect via switch (never directly to router)
+- Node security fields: `security_role`, `zone` (OUTSIDE/INSIDE/MANAGEMENT)
+
+**Config rules** (every router gets):
+- SSH (v2) with 12-char min password requirement
+- AAA (local authentication) with login rate-limiting
+- Syslog/NTP with standard servers (10.0.10.50, 10.0.10.100)
+- Service hardening (no finger, no small servers, source-route disable)
+- Banner and session timeout enforcement
+
+**Use case**: Small to medium labs with basic access controls
+
+### Profile: "enterprise"
+
+Full security archetype with Zone-Based Firewall (ZBF), redundancy, and defense-in-depth:
+
+**Mandatory topology rules**:
+- **Perimeter Router** (node_id: "FW" or "R-EDGE"): Zone-Based Firewall, connects to NAT/Internet
+- **Core Switch** (node_id: "Core-SW"): Central distribution, VLAN aggregation
+- **DMZ Switch** (node_id: "DMZ-SW"): Isolated for servers, connected to perimeter router
+- **Management Switch** (node_id: "MGMT-SW"): Out-of-band management VLAN only
+- **SIEM** (node_id: "SIEM"): Syslog/monitoring host on MGMT-SW
+- **Secondary Router** (node_id: "FW2" or "R-EDGE2"): For ≥6-node topologies (redundancy via HSRP)
+
+**VLAN segmentation** (auto-detected from switch names):
+- VLAN 10 MGMT (`Mgmt`/`MGMT` prefix)
+- VLAN 20 USERS (`User`/`LAN` prefix)
+- VLAN 30 SERVERS (`Srv`/`Server` prefix)
+- VLAN 40 VOIP (`VoIP`/`Voice` prefix)
+- VLAN 50 IOT (`IoT` prefix)
+- VLAN 60 DMZ (`DMZ` prefix)
+- VLAN 100 GUEST (`Guest` prefix)
+- VLAN 999 NATIVE-UNUSED (trunk native, prevents VLAN hopping)
+
+**Config hardening** (every router gets):
+- Full Block A (universal): SSH, AAA, NTP auth, SNMPv3, Syslog to SIEM, loopback0, domain-name
+- Block B (perimeter router): **Zone-Based Firewall** (OUTSIDE/INSIDE/DMZ zones), anti-spoofing ACLs, TCP intercept (SYN flood protection), OSPF MD5 auth, NAT PAT overload
+- Block C (secondary/internal): OSPF auth, HSRP with MD5 authentication, redundant link failover
+- Block D (core/distribution switch): STP hardening, spanning-tree guard-root
+- Block E (access switches): DHCP Snooping, DAI (Dynamic ARP Inspection), port-security, storm-control, BPDU Guard
+- Block F (VPCS hosts): Auto-assigned IPs from VLAN subnets, correct gateway routing
+- Block G (SIEM): Fixed IP on MGMT VLAN
+
+**Use case**: Production networks, compliance-driven labs (PCI, HIPAA, enterprise security standards), realistic security training
+
+---
+
+### Preflight Profile JSON with Security
+
+When using a saved preflight profile, include the `security_profile` field:
+
+```json
+{
+  "gns3_version": "2.2.54",
+  "supports_iou": false,
+  "supports_qemu": true,
+  "supports_docker": false,
+  "strict_validation": true,
+  "require_template_image_map": false,
+  "template_image_map": {},
+  "security_profile": "enterprise"
+}
+```
 
 ### CLI Arguments
 
@@ -241,10 +339,13 @@ print(f"Exported to: {path}")
 |----------|-------|-------------|
 | `--request` | `-r` | Network description (skips interactive prompt) |
 | `--output` | `-o` | Output JSON file path |
+| `--catalog` | | Path to custom appliance catalog JSON overlay |
 | `--profile` | | Path to preflight environment profile JSON |
+| `--security-profile` | | Apply security hardening: `none` \| `basic` \| `enterprise` |
 | `--no-phase2` | | Skip Phase 2 (software configuration generation) |
 | `--project-output` | | Output `.gns3project` path |
 | `--no-validate` | | Skip post-export structural validation |
+| `--configs` | | Export raw configs to directory for pre-GNS3 review |
 | `--yes` | | Auto-approve interactive checkpoints |
 
 ### Preflight Profile JSON
@@ -258,16 +359,18 @@ The profile file allows non-interactive, backend/frontend-friendly runs:
   "supports_qemu": true,
   "supports_docker": false,
   "strict_validation": true,
-  "require_template_image_map": true,
+  "require_template_image_map": false,
   "template_image_map": {
     "Cisco 3745": "c3745-adventerprisek9-mz.124-25d.image",
     "Cisco 7200": "c7200-adventerprisek9-mz.124-24.T5.image"
-  }
+  },
+  "security_profile": "none"
 }
 ```
 
 - When `require_template_image_map=true`, appliance nodes must use template names present in `template_image_map`.
 - During export, this map is passed to `gns3_exporter.convert(..., image_map=...)` to keep image selection deterministic.
+- `security_profile` can be `"none"`, `"basic"`, or `"enterprise"` (see Security Profiles section above)
 
 ### Environment Variables
 
@@ -493,17 +596,25 @@ IOU (IOS on Unix) nodes use a different expansion model from Dynamips:
 
 ## Known Issues & Roadmap
 
-### Pending Code Fixes (Phase 4)
+### Recently Completed (V3.3+)
+
+- ✅ **Security profiles** ("none", "basic", "enterprise") — topology and config hardening rules injected via LLM prompts
+- ✅ **LLM utilities consolidation** — `llm_utils.py` is SSOT for client, retry, JSON extraction
+- ✅ **Constants SSOT** — `constants/` package is authoritative; no more drift
+- ✅ **Config review export** — `--configs DIR` exports raw configs for pre-GNS3 review
+- ✅ **VLAN patching guarantee** — `topology_finalizer.apply_switch_port_patches()` runs even with `--no-phase2`
+
+### Pending Code Fixes (Phase 4+)
 
 Most previously documented constant-drift issues were resolved by migrating shared values to `constants/`.
 
 Remaining work should focus on behavior-level hardening (integration tests, broader fixture coverage, and any platform-specific edge cases uncovered during validation).
 
 ### Planned Improvements
-- **Derive Dynamips max ports from hw_config**: Remove hardcoded `_DYNAMIPS_MAX_PORTS` from `schema.py`, compute from `hw_config.DYNAMIPS_SLOT_MODULES`
-- **Remove dead code**: Delete `config_extractor.py`, `assembler.py`, `gns3_fetcher.py` (live deployment remnants)
-- **Full LLM retry with error feedback**: Feed Pydantic validation errors back to the LLM for self-correction (partially implemented)
-- **Topology edit mode**: Interactive editing of existing topologies via natural language (implemented in `ai_agent.py`, needs UI integration)
+
+- **Remove dead code**: Delete any unused legacy modules (live deployment remnants if present)
+- **Expand security profiles**: Add more specialized archetypes (e.g., "industrial", "healthcare")
+- **Topology edit mode UI**: Interactive editing of existing topologies via natural language (logic in `ai_agent.py`, needs UI)
 
 ---
 

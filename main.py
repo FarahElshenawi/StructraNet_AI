@@ -72,6 +72,12 @@ def parse_args():
                         help="Export raw configs to DIR for pre-GNS3 review")
     parser.add_argument("--yes", action="store_true",
                         help="Auto-approve generation without interactive confirmation")
+    parser.add_argument(
+    "--security-profile",
+    choices=["none", "basic", "enterprise"],
+    default=None,
+    help="Apply automated security hardening (default: none)"
+)
     return parser.parse_args()
 
 
@@ -229,6 +235,10 @@ def main():
         save_profile(profile, profile_path)
         print(f"[Preflight] Profile saved to: {profile_path}")
 
+    if getattr(args, "security_profile", None):
+        profile.security_profile = args.security_profile
+        print(f"[Preflight] Security Profile enforced via CLI: {profile.security_profile.upper()}")
+
     filtered_inventory, blocked_types = filter_inventory_by_profile(inventory, profile)
     if not filtered_inventory:
         print("[ERR] Profile blocks all available node types in inventory.")
@@ -300,7 +310,7 @@ def main():
         print(f"  Phase 1 output saved as final: {final_file}")
     else:
         print("\n[5/6] Phase 2 — Generating software configurations (IP/routing/startup)...")
-        final_dict = run_phase2(phase1_file, final_file)
+        final_dict = run_phase2(phase1_file, final_file, security_profile=profile.security_profile)
         if final_dict is None:
             print("[WARN] Phase 2 failed — falling back to Phase 1 topology (no software configs).")
             final_dict = topo_dict
